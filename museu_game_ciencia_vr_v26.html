@@ -1,0 +1,2109 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Museu Game Ciência VR - Escape Room Interativo</title>
+    
+    <script src="https://aframe.io/releases/1.4.2/aframe.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/gh/c-frame/aframe-extras@7.2.0/dist/aframe-extras.min.js"></script>
+    <script src="https://unpkg.com/aframe-troika-text/dist/aframe-troika-text.min.js"></script>
+
+    <script>
+        // ==========================================
+        // DADOS E COORDENADAS GLOBAIS
+        // ==========================================
+        window.ESCALA_MUNDO = 0.5; // compensa a arquitetura ter sido modelada para uma câmera de 3,2 m; ver atributo scale de #ambiente-museu, deve ser igual a este valor
+        var BRILHO_FINO = 0.7;
+        var BRILHO_GROSSO = 0.4;
+        
+        var ALTURA_SALA = 4.5;
+        var RAIO_HEX = 8;          
+
+        var PONTOS_TELEPORTE = [
+            { id: 0, hub: {x:  0.000, z: -19.021, rot: 180}, sala: {x:   0.000, z: -60.000, rot: 0} },
+            { id: 1, hub: {x:-11.180, z: -15.388, rot: 216}, sala: {x: -35.267, z: -48.541, rot: 36} },
+            { id: 2, hub: {x:-18.090, z:  -5.878, rot: 252}, sala: {x: -57.063, z: -18.541, rot: 72} },
+            { id: 3, hub: {x:-18.090, z:   5.878, rot: 288}, sala: {x: -57.063, z:  18.541, rot: 108} },
+            { id: 4, hub: {x:-11.180, z:  15.388, rot: 324}, sala: {x: -35.267, z:  48.541, rot: 144} },
+            { id: 5, hub: {x:  0.000, z:  19.021, rot: 0},   sala: {x:   0.000, z:  60.000, rot: 180} },
+            { id: 6, hub: {x: 11.180, z:  15.388, rot: 36},  sala: {x:  35.267, z:  48.541, rot: 216} },
+            { id: 7, hub: {x: 18.090, z:   5.878, rot: 72},  sala: {x:  57.063, z:  18.541, rot: 252} },
+            { id: 8, hub: {x: 18.090, z:  -5.878, rot: 108}, sala: {x:  57.063, z: -18.541, rot: 288} },
+            { id: 9, hub: {x: 11.180, z: -15.388, rot: 144}, sala: {x:  11.180, z: -15.388, rot: 324} } 
+        ];
+
+        function dimCor(hex, f) {
+            var n = parseInt(hex.replace('#', ''), 16);
+            var r = Math.round(((n >> 16) & 255) * f), g = Math.round(((n >> 8) & 255) * f), b = Math.round((n & 255) * f);
+            return '#' + ((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1);
+        }
+
+        // ==========================================
+        // FUNÇÕES DO HUD INICIAL (Corrigido o ReferenceError)
+        // ==========================================
+        function liberarAcessoDireto() {
+            var tentativas = 0;
+            (function tentar() {
+                var el = document.querySelector('[gerador-de-salas]');
+                var comp = el && el.components && el.components['gerador-de-salas'];
+                if (comp && typeof comp.ativarAcessoDireto === 'function') {
+                    comp.ativarAcessoDireto();
+                } else if (tentativas++ < 100) {
+                    setTimeout(tentar, 100);
+                }
+            })();
+        }
+
+        // ==========================================
+        // MENU INICIAL EM VR (A-Frame): funciona no desktop (mouse) e no óculos (laser).
+        // O ambiente fica oculto e a locomoção travada enquanto o menu está aberto.
+        // ==========================================
+        window.menuInicialAberto = true;
+
+        // true só dentro de uma sessão WebXR real (óculos/emulador). No PC, o botão de tela cheia do
+        // A-Frame também liga o estado 'vr-mode', mas SEM sessão XR — por isso 'vr-mode' não serve
+        // para distinguir óculos de computador.
+        function emSessaoXR() {
+            var sc = document.querySelector('a-scene');
+            if (!sc) return false;
+            if (sc.xrSession) return true;
+            return !!(sc.renderer && sc.renderer.xr && sc.renderer.xr.isPresenting);
+        }
+
+        // ALTURA DA CÂMERA
+        // No PC a câmera fica na altura dos olhos de uma pessoa em pé (1,6 m).
+        // No óculos VR a altura NÃO é fixada pelo código: vem do próprio rastreamento da cabeça
+        // (referência 'local-floor', o chão é o nível 0 definido no óculos). Assim quem joga sentado
+        // tem os olhos na altura real da cabeça, sem depender da altura da pessoa.
+        function aplicarAlturaCamera() {
+            var cam = document.getElementById('camera-jogador');
+            if (!cam) return;
+            if (emSessaoXR()) {
+                cam.setAttribute('position', '0 0 0');
+                cam.setAttribute('camera', 'userHeight', 0);   // sem offset extra de altura
+            } else {
+                cam.setAttribute('position', '0 1.6 0');
+                cam.setAttribute('camera', 'userHeight', 1.6);
+            }
+        }
+
+        // Trava a rotação da câmera (mouse) enquanto o menu está aberto. No óculos a cabeça
+        // não pode ser travada (e não deve), então dentro do VR o controle volta ao normal.
+        function atualizarTravaCamera() {
+            var cam = document.getElementById('camera-jogador');
+            var scene = document.querySelector('a-scene');
+            if (!cam || !scene) return;
+            var travar = window.menuInicialAberto && !emSessaoXR();
+            cam.setAttribute('look-controls', 'enabled', !travar);
+            if (travar) {
+                var lc = cam.components && cam.components['look-controls'];
+                if (lc && lc.yawObject) lc.yawObject.rotation.y = 0;
+                if (lc && lc.pitchObject) lc.pitchObject.rotation.x = 0;
+            }
+        }
+        document.addEventListener('enter-vr', function () {
+            // Tela cheia no PC: garante que nenhum bloqueio de ponteiro "prenda" o ESC
+            if (!emSessaoXR() && document.pointerLockElement && document.exitPointerLock) document.exitPointerLock();
+            atualizarTravaCamera();
+            aplicarAlturaCamera();
+        });
+        document.addEventListener('exit-vr', function () {
+            atualizarTravaCamera();
+            aplicarAlturaCamera();
+        });
+
+        // Mantém o A-Frame sincronizado quando a tela cheia termina por fora (ESC do navegador):
+        // sem isso o estado 'vr-mode' pode ficar ligado e a interface "presa" em tela cheia.
+        function sincronizarSaidaTelaCheia() {
+            var sc = document.querySelector('a-scene');
+            var cheia = document.fullscreenElement || document.webkitFullscreenElement;
+            if (!cheia && sc && sc.is('vr-mode') && !emSessaoXR()) { try { sc.exitVR(); } catch (e) {} }
+        }
+        document.addEventListener('fullscreenchange', sincronizarSaidaTelaCheia);
+        document.addEventListener('webkitfullscreenchange', sincronizarSaidaTelaCheia);
+        // ESC também solta o ponteiro e sai da tela cheia (caso o navegador entregue o evento à página)
+        document.addEventListener('keydown', function (e) {
+            if (e.key !== 'Escape' || emSessaoXR()) return;
+            if (document.pointerLockElement && document.exitPointerLock) document.exitPointerLock();
+            var cheia = document.fullscreenElement || document.webkitFullscreenElement;
+            if (cheia) {
+                var sair = document.exitFullscreen || document.webkitExitFullscreen;
+                if (sair) { try { sair.call(document); } catch (err) {} }
+            }
+        });
+
+        // Devolve a câmera e o rig ao estado inicial (usado ao voltar para a seleção de modo).
+        function reiniciarCamera() {
+            var rig = document.getElementById('rig');
+            var cam = document.getElementById('camera-jogador');
+            if (rig) {
+                rig.setAttribute('scale', '1 1 1');
+                rig.setAttribute('movement-controls', 'speed', 0.2);
+            }
+            if (cam) {
+                aplicarAlturaCamera();
+                cam.setAttribute('rotation', '0 0 0');
+                cam.setAttribute('camera', { fov: 80, zoom: 1 });
+                var lc = cam.components && cam.components['look-controls'];
+                if (lc && lc.yawObject) lc.yawObject.rotation.set(0, 0, 0);
+                if (lc && lc.pitchObject) lc.pitchObject.rotation.set(0, 0, 0);
+            }
+        }
+
+        function abrirMenuInicial() {
+            window.menuInicialAberto = true;
+            reiniciarCamera();
+            var menu = document.getElementById('menu-inicial-vr');
+            var amb = document.getElementById('ambiente-museu');
+            var rig = document.getElementById('rig');
+            if (menu) menu.object3D.visible = true;
+            if (amb) amb.object3D.visible = false;
+            if (rig) rig.setAttribute('movement-controls', 'enabled', false);
+            atualizarTravaCamera();
+        }
+
+        function iniciarAmbiente(modo) {
+            if (!window.menuInicialAberto) return;
+            window.menuInicialAberto = false;
+            // O blink escurece a tela; a troca de cena acontece durante o escuro.
+            teleportarComBlink(0, 0, 8 * window.ESCALA_MUNDO, 0, function () {
+                var menu = document.getElementById('menu-inicial-vr');
+                var amb = document.getElementById('ambiente-museu');
+                var rig = document.getElementById('rig');
+                if (menu) menu.object3D.visible = false;
+                if (amb) amb.object3D.visible = true;
+                if (rig) rig.setAttribute('movement-controls', 'enabled', true);
+                atualizarTravaCamera();
+                if (modo === 'visitar') liberarAcessoDireto();
+            });
+        }
+
+        // Botão do menu (aparência do HUD antigo): fundo escuro, borda e texto na cor do modo;
+        // no hover o fundo se preenche com a cor e o texto escurece.
+        // Uso: <a-plane class="interactable" botao-modo="modo: visitar; cor: #00fff2"> + texto filho.
+        AFRAME.registerComponent('botao-modo', {
+            schema: { modo: { type: 'string' }, cor: { default: '#00fff2' } },
+            init: function () {
+                var el = this.el, d = this.data;
+                var texto = function () { return el.querySelector('[troika-text]'); };
+                el.addEventListener('click', function () { iniciarAmbiente(d.modo); });
+                el.addEventListener('mouseenter', function () {
+                    el.setAttribute('material', 'color', d.cor);
+                    var t = texto(); if (t) t.setAttribute('troika-text', 'color', '#05010f');
+                });
+                el.addEventListener('mouseleave', function () {
+                    el.setAttribute('material', 'color', '#0c0c18');
+                    var t = texto(); if (t) t.setAttribute('troika-text', 'color', d.cor);
+                });
+            }
+        });
+
+        // Logo sem distorção: lê a proporção real da imagem e encaixa (com fundo branco) numa
+        // caixa máxima. Filhos esperados: .logo-fundo (plano branco) e .logo-imagem (a-image).
+        AFRAME.registerComponent('logo-proporcional', {
+            schema: { larguraMax: { default: 1.8 }, alturaMax: { default: 0.85 }, margem: { default: 0.08 }, asset: { default: '#logo-mgc' } },
+            init: function () {
+                var self = this, d = this.data;
+                var fundo = this.el.querySelector('.logo-fundo'), img = this.el.querySelector('.logo-imagem');
+                var asset = document.querySelector(d.asset);
+                var ajustar = function () {
+                    if (!asset || !asset.naturalWidth || !fundo || !img) return;
+                    var r = asset.naturalHeight / asset.naturalWidth;
+                    var w = Math.min(d.larguraMax, d.alturaMax / r), h = w * r;
+                    img.setAttribute('width', w.toFixed(4)); img.setAttribute('height', h.toFixed(4));
+                    fundo.setAttribute('width', (w + 2 * d.margem).toFixed(4)); fundo.setAttribute('height', (h + 2 * d.margem).toFixed(4));
+                };
+                if (asset && asset.complete && asset.naturalWidth) ajustar();
+                else if (asset) asset.addEventListener('load', ajustar);
+            }
+        });
+
+        // ==========================================
+        // COMPONENTE: RASTREADOR DE COORDENADAS (DEBUG)
+        // ==========================================
+        AFRAME.registerComponent('rastreador-coords', {
+            tick: function () {
+                var display = document.getElementById('coord-display');
+                var cam = document.querySelector('#camera-jogador');
+                if (display && cam && cam.object3D) {
+                    var pos = new THREE.Vector3();
+                    cam.object3D.getWorldPosition(pos);
+                    display.innerText = 'X: ' + pos.x.toFixed(3) + ' | Y: ' + pos.y.toFixed(3) + ' | Z: ' + pos.z.toFixed(3);
+                }
+            }
+        });
+
+        // ==========================================
+        // COMPONENTE: CURSOR QUE SEGUE O MOUSE
+        // ==========================================
+        AFRAME.registerComponent('mouse-cursor-tracker', {
+            init: function () {
+                this.mouse = new THREE.Vector2();
+                this.cameraEl = document.querySelector('#camera-jogador');
+                
+                window.addEventListener('mousemove', (e) => {
+                    this.mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
+                    this.mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
+                });
+            },
+            tick: function () {
+                // Dentro do óculos o anel do mouse não existe (o laser dos controles faz o apontamento)
+                if (emSessaoXR()) {
+                    this.el.object3D.visible = false;
+                    return;
+                }
+                this.el.object3D.visible = true;
+                
+                var cam = this.cameraEl.getObject3D('camera');
+                if(cam) {
+                    var fov = cam.fov * Math.PI / 180;
+                    var aspect = cam.aspect;
+                    var z = -1.5; 
+                    var h = 2 * Math.tan(fov / 2) * Math.abs(z);
+                    var w = h * aspect;
+                    
+                    this.el.object3D.position.x += ((this.mouse.x * w/2) - this.el.object3D.position.x) * 0.4;
+                    this.el.object3D.position.y += ((this.mouse.y * h/2) - this.el.object3D.position.y) * 0.4;
+                    this.el.object3D.position.z = z;
+                }
+            }
+        });
+
+        // ==========================================
+        // COMPONENTE: BLINK (FADE PRETO PARA TELEPORTE)
+        // ==========================================
+        AFRAME.registerComponent('blink-fade', {
+            schema: { duracao: { default: 180 } }, 
+            init: function () {
+                this.estado = 'ocioso';
+                this.t = 0;
+                this.acao = null;
+                this.el.object3D.visible = false;
+            },
+            disparar: function (acao) {
+                if (this.estado !== 'ocioso') return; 
+                this.acao = acao;
+                this.estado = 'escurecendo';
+                this.t = 0;
+                this.el.object3D.visible = true;
+            },
+            tick: function (time, dt) {
+                if (this.estado === 'ocioso') return;
+                var mesh = this.el.getObject3D('mesh');
+                if (!mesh) { 
+                    if (this.acao) this.acao();
+                    this.acao = null;
+                    this.estado = 'ocioso';
+                    return;
+                }
+                mesh.renderOrder = 999;
+                this.t += dt;
+                var k = Math.min(this.t / this.data.duracao, 1);
+                if (this.estado === 'escurecendo') {
+                    mesh.material.opacity = k;
+                    if (k >= 1) {
+                        if (this.acao) this.acao();
+                        this.acao = null;
+                        this.estado = 'clareando';
+                        this.t = 0;
+                    }
+                } else {
+                    mesh.material.opacity = 1 - k;
+                    if (k >= 1) {
+                        this.estado = 'ocioso';
+                        this.el.object3D.visible = false;
+                    }
+                }
+            }
+        });
+
+        // alinharOlhar (opcional): no óculos, gira o rig para compensar a direção real da cabeça,
+        // de modo que o jogador chegue olhando exatamente para rotYGraus (ex.: de frente para o menu).
+        // No desktop o mesmo efeito vem de zerar o giro do mouse (look-controls).
+        function teleportarComBlink(x, y, z, rotYGraus, aoTeleportar, alinharOlhar) {
+            var rig = document.querySelector('#rig');
+            var blink = document.querySelector('#blink');
+            var fade = blink && blink.components['blink-fade'];
+            if (!rig) return;
+            
+            var aplicar = function () {
+                var cam = document.querySelector('#camera-jogador');
+                var offsetX = 0;
+                var offsetZ = 0;
+
+                // giro final do rig (graus); com alinharOlhar no VR, desconta o heading da cabeça
+                var rotFinal = rotYGraus || 0;
+                var sceneEl = document.querySelector('a-scene');
+                if (alinharOlhar && cam && cam.object3D && emSessaoXR()) {
+                    var eulCabeca = new THREE.Euler().setFromQuaternion(cam.object3D.quaternion, 'YXZ');
+                    rotFinal = (rotYGraus || 0) - eulCabeca.y * 180 / Math.PI;
+                }
+                
+                if (cam && cam.object3D) {
+                    var offset = cam.object3D.position.clone();
+                    offset.y = 0; 
+                    
+                    var anguloRad = rotFinal * Math.PI / 180;
+                    var eul = new THREE.Euler(0, anguloRad, 0, 'YXZ');
+                    offset.applyEuler(eul);
+                    
+                    offsetX = offset.x;
+                    offsetZ = offset.z;
+                }
+                
+                rig.setAttribute('position', { x: x - offsetX, y: y, z: z - offsetZ });
+                rig.setAttribute('rotation', { x: 0, y: rotFinal, z: 0 });
+                
+                if (aoTeleportar) aoTeleportar();
+                try {
+                    var lc = cam && cam.components['look-controls'];
+                    if (lc && lc.yawObject && !emSessaoXR()) lc.yawObject.rotation.y = 0;
+                } catch (e) {}
+            };
+            
+            if (!fade) { aplicar(); return; }
+            fade.disparar(aplicar);
+        }
+
+        // ==========================================
+        // GERAÇÃO DE SALAS HEXAGONAIS
+        // ==========================================
+        function criarEl(tag, attrs, pai) {
+            var e = document.createElement(tag);
+            for (var k in attrs) e.setAttribute(k, String(attrs[k]));
+            if (pai) pai.appendChild(e);
+            return e;
+        }
+
+        var salasGeracaoRefs = new Array(9);
+        function mostrarSala(i) {
+            for (var k = 0; k < 9; k++) if (salasGeracaoRefs[k]) salasGeracaoRefs[k].setAttribute('visible', k === i);
+        }
+        function esconderSalas() {
+            for (var k = 0; k < 9; k++) if (salasGeracaoRefs[k]) salasGeracaoRefs[k].setAttribute('visible', false);
+        }
+
+        AFRAME.registerComponent('salas-geracao', {
+            init: function () {
+                for (var i = 0; i < 9; i++) this.construirSala(i);
+            },
+            construirSala: function (i) {
+                var c = conteudosMuseu[i];
+                var fina = dimCor(c.cor, BRILHO_FINO);
+                var wp = PONTOS_TELEPORTE[i].sala;
+                
+                var sala = criarEl('a-entity', { position: wp.x.toFixed(3) + ' 0 ' + wp.z.toFixed(3), rotation: '0 ' + wp.rot + ' 0', visible: 'false' }, this.el);
+                salasGeracaoRefs[i] = sala;
+
+                criarEl('a-cylinder', { position: '0 ' + (ALTURA_SALA / 2) + ' 0', rotation: '0 30 0', radius: RAIO_HEX, height: ALTURA_SALA, 'segments-radial': 6, material: 'shader: flat; color: #05010f; side: back' }, sala);
+                criarEl('a-circle', { position: '0 0.02 0', rotation: '-90 0 0', radius: RAIO_HEX, segments: 6, 'piso-neon': 'cor: ' + fina + '; repeat: 6 6' }, sala);
+                criarEl('a-torus', { position: '0 0.06 0', rotation: '90 0 0', radius: RAIO_HEX, 'radius-tubular': 0.06, 'segments-tubular': 6, material: 'shader: flat; color: ' + fina }, sala);
+                criarEl('a-torus', { position: '0 ' + (ALTURA_SALA - 0.06) + ' 0', rotation: '90 0 0', radius: RAIO_HEX, 'radius-tubular': 0.06, 'segments-tubular': 6, material: 'shader: flat; color: ' + fina }, sala);
+
+                criarEl('a-entity', { position: '0 3.1 -6.85', 'troika-text': 'value: ' + c.sala.toUpperCase() + '\n( ' + c.ano + ' ); color: ' + fina + '; align: center; fontSize: 0.42; maxWidth: 6; lineHeight: 1.2' }, sala);
+                criarEl('a-entity', { position: '0 1.9 -6.85', 'troika-text': 'value: SALA TEMPORÁRIA — EM CONSTRUÇÃO\nAqui ficarão os jogos da ' + c.sala + '.; color: #ffffff; align: center; fontSize: 0.2; maxWidth: 6; lineHeight: 1.3' }, sala);
+
+                var ped = criarEl('a-entity', { position: '0 0 -3' }, sala);
+                criarEl('a-cylinder', { position: '0 0.5 0', radius: 0.35, height: 1, color: '#12121f' }, ped);
+                criarEl('a-torus', { position: '0 1.0 0', rotation: '90 0 0', radius: 0.35, 'radius-tubular': 0.02, material: 'shader: flat; color: ' + fina }, ped);
+                var btn = criarEl('a-cylinder', { position: '0 1.05 0', radius: 0.2, height: 0.08, material: 'shader: flat; color: ' + fina, class: 'interactable', animation__pulse: 'property: material.color; from: #111111; to: ' + fina + '; dir: alternate; loop: true; dur: 1200; easing: easeInOutSine' }, ped);
+                criarEl('a-entity', { position: '0 1.6 0', 'troika-text': 'value: VOLTAR AO HUB; color: #ffffff; align: center; fontSize: 0.16; maxWidth: 1.8; outlineWidth: 0.006; outlineColor: #000000' }, ped);
+                
+                btn.addEventListener('click', function () {
+                    var r = PONTOS_TELEPORTE[i].hub;
+                    teleportarComBlink(r.x * window.ESCALA_MUNDO, 0, r.z * window.ESCALA_MUNDO, r.rot, function () { esconderSalas(); });
+                });
+            }
+        });
+
+        // ==========================================
+        // COMPONENTE: VOO VERTICAL (EXCLUSIVO DESENVOLVEDOR)
+        // ==========================================
+        AFRAME.registerComponent('vertical-movement', {
+            schema: { speed: { default: 0.15 } },
+            init: function () {
+                this.keys = {};
+                this.active = false;
+                window.addEventListener('keydown', (e) => { this.keys[e.key.toLowerCase()] = true; });
+                window.addEventListener('keyup', (e) => { this.keys[e.key.toLowerCase()] = false; });
+            },
+            tick: function () {
+                if (!this.active) return;
+                if (this.keys['e']) {
+                    this.el.object3D.position.y += this.data.speed;
+                }
+                if (this.keys['q']) {
+                    this.el.object3D.position.y -= this.data.speed;
+                }
+            }
+        });
+
+        // ==========================================
+        // DADOS CURATORIAIS
+        // ==========================================
+        // Modelo 3D do console (CC-BY 4.0 — Atari 2600 low poly console, por mismailsbasura,
+        // https://sketchfab.com/3d-models/atari-2600-low-poly-console-b1dff98350be4137be24695b04a199c8).
+        // Embutido como data URI para o arquivo continuar sendo um único .html autocontido.
+        
+        var conteudosMuseu = [
+            {
+                "sala": "1ª Geração",
+                "ano": "1972–1977",
+                "cor": "#ff7b00",
+                "tipo": "arcade",
+                "tema": "A Origem dos Consoles Domésticos e a Era dos Jogos Dedicados",
+                "video": {
+                    "titulo": "A história da 1ª geração de video-games – História da Tecnologia",
+                    "fonte": "TecMundo",
+                    "funcao": "Executa o clipe historiográfico demonstrando o funcionamento do Brown Box, do Odyssey e do Pong, emitindo os efeitos sonoros característicos da época (\"bipes\" de colisão de pixels)."
+                },
+                "esq": {
+                    "titulo": "Magnavox Odyssey 400",
+                    "anos": "1976",
+                    "fabricante": "Magnavox / Philips",
+                    "geracao": "1ª Geração",
+                    "ficha": "Circuitos lógicos analógicos (sem CPU); 3 jogos embutidos (Smash, Tennis, Hockey); pontuação automática na tela; controles por botões giratórios.",
+                    "texto": "Lançado nos Estados Unidos em 1976 após a aquisição da Magnavox pela Philips, o Odyssey 400 foi um marco da primeira geração de consoles. Seu grande diferencial tecnológico foi a introdução da pontuação automática exibida diretamente na tela do televisor, recurso inédito em relação aos modelos anteriores. Operado por três seletores giratórios de cada lado do aparelho, estimulava a interação familiar e o raciocínio espacial em partidas baseadas no clássico Pong.",
+                    "curva": {
+                        "titulo": "A Evolução da Primeira Geração e a Automação do Placard",
+                        "texto": "A história dos videogames domésticos teve início com a criação da \"Caixa Marrom\" (Brown Box) por Ralph Baer e sua posterior comercialização como Magnavox Odyssey em 1972. Naquela fase inicial, as limitações computacionais impediam que o console registrasse o placar ou gerasse cores, exigindo o uso de folhas de acetato transparente fixadas sobre a tela da TV e marcadores manuais de pontuação.\n\nMas com o tempo a série Odyssey ficou conhecida no mercado sob a gestão da Philips, e o Magnavox Odyssey 400 lançado em 1976 trouxe um salto tecnológico ao incorporar chips dedicados capazes de renderizar a pontuação digitalmente na tela. O console dispunha dos jogos Tennis, Hockey e Smash (modalidade estilo squash contra uma parede virtual). Os controles eram integrados ao corpo do próprio console por meio de dials giratórios que ajustavam a velocidade da bola e a posição das raquetes nos eixos vertical e horizontal.\n\nO Odyssey 400 mostrou como os primeiros consoles transformaram uma geração tornando a sala de TV nos lares em um espaço interativo, deslocando o público da recepção passiva da televisão para o protagonismo motor interativo.",
+                        "midias": "Texto de DC + Fotos do circuito interno de transistores + Anúncio publicitário do modelo."
+                    },
+                    "imagemPequena": "placas/Odyssey_400.webp",
+                    "imagem": "placas/Odyssey_400_Curva.webp"
+                },
+                "dir": {
+                    "titulo": "Radofin Tele-Sport Mini",
+                    "anos": "1977",
+                    "fabricante": "Radofin",
+                    "geracao": "1ª Geração",
+                    "ficha": "Processador dedicado tipo Pong (General Instruments AY-3-8500); controles destacáveis do gabinete; saída em preto e branco.",
+                    "texto": "O Radofin Tele-Sport Mini representa a expansão dos consoles do tipo Pong no mercado europeu no final da década de 1970. Compacto e funcional, o aparelho destacou-se por apresentar um tamanho reduzido com controles que podiam ser embutidos no corpo principal do videogame. Essa característica ergonômica ampliava a mobilidade dos jogadores, sendo recomendada para o desenvolvimento da coordenação motora fina e psicomotricidade no público infantil.",
+                    "curva": {
+                        "titulo": "A Era do Chip Dedicado e a Ergonomia Infantil",
+                        "texto": "O surgimento do circuito integrado especializado AY-3-8500, produzido pela General Instruments a partir de 1976, democratizou a fabricação de videogames em escala global. Esse componente reunia em um único chip todas as rotinas lógicas para gerar jogos de raquete e bola, permitindo que diversas fabricantes lançassem seus próprios modelos com variações estéticas e ergonômicas.\n\nO Radofin Tele-Sport Mini é um exemplo representativo desse fenômeno. Ao contrário dos consoles da época que mantinham os botões fixos na carcaça plástica, o Tele-Sport Mini introduziu cabos extensores nos controles manuais. Do ponto de vista da aprendizagem não formal e do Game Design, essa inovação ergonômica permitiu que as crianças jogassem a distâncias mais confortáveis da tela da TV, promovendo o exercício de lateralidade, precisão visuomotora e raciocínio antecipatório.",
+                        "midias": "Texto de DC + Diagrama do chip AY-3-8500 + Foto do console com controles destacados."
+                    }
+                }
+            },
+            {
+                "sala": "2ª Geração",
+                "ano": "1976–1984",
+                "cor": "#ff2d55",
+                "tipo": "cartucho",
+                "tema": "A Revolução dos Cartuchos, o Fenômeno Atari e o Crash de 1983",
+                "video": {
+                    "titulo": "A história da 2ª geração de video-games – História da Tecnologia",
+                    "fonte": "TecMundo",
+                    "funcao": "Reproduz o panorama da era dos 8 bits, demonstrando a ascensão da Activision, a disputa entre o Atari e o Intellivision e as matérias de jornal sobre o colapso do mercado em 1983."
+                },
+                "esq": {
+                    "titulo": "Atari 2600 / VCS",
+                    "anos": "1977 / 1983",
+                    "fabricante": "Atari / Polyvox",
+                    "geracao": "2ª Geração",
+                    "ficha": "Processador MOS 6507 de 8 bits; mídias em cartuchos ROM; joystick de haste com botão único.",
+                    "texto": "O Atari 2600 emergiu como o maior símbolo cultural da segunda geração de consoles. Lançado nos EUA em 1977 e produzido oficialmente no Brasil a partir de 1983 pela Polyvox, o sistema popularizou o uso de cartuchos intercambiáveis e o controle tipo joystick. Seu acervo estimulava o raciocínio lógico, a memória e a psicomotricidade em títulos célebres como Space Invaders, River Raid e Pitfall, tornando-se o centro do entretenimento familiar nas décadas de 1970 e 1980.",
+                    "curva": {
+                        "titulo": "Do Fenômeno Social ao Crash de 1983 e a Chegada ao Brasil",
+                        "texto": "Projetado sob o nome de código \"Stella\", o Atari Video Computer System (VCS) revolucionou a indústria ao separar o hardware do software, permitindo que os jogos fossem comercializados separadamente em cartuchos de memória ROM. No Brasil, antes da sua fabricação oficial em 1983, o console era importado clandestinamente, exigindo adaptações nas assistências técnicas para converter o sinal de vídeo americano (NTSC) para o padrão brasileiro (PAL-M).\n\nA campanha publicitária oficial da Polyvox, criada pela agência DPZ, batizou o console como \"O Inimigo nº 1 da Família Brasileira\" e \"O Inimigo nº 1 da Solidão\". A estratégia consistia em apresentar o videogame como uma ferramenta capaz de \"combater a solidão\" e unir pais e filhos na sala de estar.\n\nContudo, o excesso de jogos de baixa qualidade produzidos sem controle por empresas terceirizadas culminou no Crash dos Videogames de 1983 nos Estados Unidos. O maior símbolo desse colapso foi o jogo E.T. The Extra-Terrestrial, programado em apenas seis semanas. Com vendas baixíssimas, milhões de cartuchos não vendidos foram enterrados em um aterro sanitário em Alamogordo, Novo México. No âmbito educacional e científico, o Atari também abrigou jogos de temáticas voltada à educação e treinamento, como o Oscar's Trash Race (desenvolvido em parceria com a Vila Sésamo para ensinar a reciclagem de lixo) e versões modificadas do Battlezone utilizadas como simuladores táticos pelo exército norte-americano.",
+                        "midias": "Texto de DC + Anúncio histórico da revista Vídeo News (\"O Inimigo nº 1 da Família Brasileira\") + Capa do jogo E.T."
+                    },
+                    "modelo": "modelos/ATARI_2600_embutido.gltf"
+                },
+                "dir": {
+                    "titulo": "Philips Odyssey 2",
+                    "anos": "1978 / 1983",
+                    "fabricante": "Magnavox / Philips",
+                    "geracao": "2ª Geração",
+                    "ficha": "Processador Intel 8048 de 8 bits; teclado alfanumérico de membrana embutido; mídias em cartuchos.",
+                    "texto": "Lançado em 1978 nos EUA e produzido no Brasil pela Philips a partir de 1983, o Odyssey 2 destacou-se por integrar um teclado alfanumérico no próprio gabinete. Vendido no mercado nacional como a melhor alternativa de \"entretenimento, educação e lazer\", o sistema dispunha de um vasto catálogo de jogos educativos exclusivos. Cartuchos como Matemática!, Jogo da Memória! e Crypto-Logic! estimulavam o raciocínio lógico, o cálculo e a alfabetização em língua inglesa.",
+                    "curva": {
+                        "titulo": "O Teclado de Membrana e a Aprendizagem de Ciências Naturais e Exatas",
+                        "texto": "Conhecido na Europa como Philips Videopac G7000, o console recebeu o nome de apenas \"Philips Odyssey\" no Brasil, pois a primeira geração da Magnavox não havia sido comercializada oficialmente no país.\n\nO principal diferencial construtivo do Odyssey 2 em relação ao seu concorrente direto, o Atari 2600, era a presença do teclado alfanumérico. Embora em alguns jogos de ação o teclado servisse apenas para registrar o nome ou a pontuação do jogador, a Philips explorou ativamente esse recurso para posicionar o aparelho como um instrumento híbrido entre videogame e computador pessoal.\n\nNa dimensão pedagógica, o acervo do Odyssey 2 destacou-se pelo desenvolvimento de habilidades cognitivas avançadas:\n• Matemática!: Exigia a resolução de operações aritméticas básicas com níveis progressivos de dificuldade utilizando o teclado.\n• Jogo da Memória!: Trabalhava a retenção visual e a repetição de sequências numéricas.\n• Crypto-Logic!: Apresentava palavras em inglês com letras embaralhadas, estimulando o raciocínio dedutivo e a assimilação de vocabulário científico e técnico.\n\nDessa forma, o Odyssey 2 consolidou-se como um precursor dos serious games no Brasil, demonstrando como a interface física do console atuava como uma ferramenta cultural capaz de mediar a aprendizagem em espaços domésticos.",
+                        "midias": "Texto de DC + Cartaz publicitário da Philips de 1983 + Encarte dos jogos Matemática! e Crypto-Logic!."
+                    }
+                }
+            },
+            {
+                "sala": "3ª Geração",
+                "ano": "1983–1990",
+                "cor": "#ff00a0",
+                "tipo": "cartucho",
+                "tema": "A Era dos 8 Bits, a Reconstrução do Mercado e o Domínio dos D-Pads",
+                "video": {
+                    "titulo": "A história da 3ª Geração de Consoles – História da Tecnologia",
+                    "fonte": "TecMundo",
+                    "funcao": "Exibe o panorama dos 8 bits, demonstrando a jogabilidade de Super Mario Bros., Alex Kidd e Phantasy Star, emitindo as clássicas melodias chiptune da era."
+                },
+                "esq": {
+                    "titulo": "SEGA Master System",
+                    "anos": "1985 / 1989",
+                    "fabricante": "SEGA / TecToy",
+                    "geracao": "3ª Geração (8 Bits)",
+                    "ficha": "Processador Zilog Z80A de 8 bits; resolução de 256x192 com 32 cores simultâneas; mídias em cartuchos e cartões (Sega Card).",
+                    "texto": "Lançado no Japão em 1985 como Sega Mark III e no Brasil em 1989 pela TecToy, o Master System foi o ícone da arquitetura de 8 bits no país. Notabilizou-se por seu visual preto com detalhes em vermelho e por periféricos inovadores, como a pistola óptica Light Phaser e os óculos tridimensionais SegaScope 3D. No Brasil, tornou-se um fenômeno de público ao adaptar personagens da cultura nacional e abordar temas como a preservação ambiental em seus jogos.",
+                    "curva": {
+                        "titulo": "A Força da TecToy e a Tropicalização dos Games no Brasil",
+                        "texto": "Enquanto o mercado norte-americano presenciou o domínio esmagador da Nintendo na era dos 8 bits, o Brasil viveu uma história completamente diferente. A aliança estratégica entre a SEGA e a fabricante brasileira TecToy, iniciada em 1989, transformou o Master System em um dos videogames mais populares da história do país.\n\nPor meio de campanhas publicitárias veiculadas nos horários de programas infantis e de uma rede de assistência técnica abrangente, o console conquistou as salas de estar brasileiras. A TecToy além de distribuir o console no país também realizou um trabalho pioneiro de \"tropicalização\" e desenvolvimento local. Títulos consagrados receberam modificações de enredo para incorporar ícones da cultura nacional, como Castelo Rá-Tim-Bum, Sítio do Pica-Pau Amarelo, Geraldinho e As Aventuras da TV Colosso.\n\nO console também se destacou pela introdução de conteúdos educativos e ambientais. Um desses jogos está presente no acervo do museu, o jogo Sapo Xulé: S.O.S. Lagoa Poluída, lançado em 1995. Ao colocar o jogador no comando de um submarino para combater cientistas que poluíam as águas, o game utilizou o lúdico como uma plataforma para conscientizar crianças e jovens sobre a poluição aquática, o descarte de lixo e a conservação dos ecossistemas.",
+                        "midias": "Texto expositivo + Fotos dos periféricos (Light Phaser e SegaScope 3D) + Capas de jogos nacionais (Sapo Xulé, TV Colosso)."
+                    }
+                },
+                "dir": {
+                    "titulo": "Nintendo Entertainment System (NES / Famicom)",
+                    "anos": "1983 / 1985",
+                    "fabricante": "Nintendo",
+                    "geracao": "3ª Geração (8 Bits)",
+                    "ficha": "Processador Ricoh 2A03 de 8 bits; memória RAM de 2 KB; introdução do controle com direcional em cruz (D-pad).",
+                    "texto": "Lançado no Japão em 1983 como Famicom e nos Estados Unidos em 1985 como NES, o \"Nintendinho\" foi o grande responsável por reerguer a indústria mundial de videogames após a crise de 1983. O console revolucionou o design de joysticks ao substituir os antigos manches pelo direcional em cruz (D-pad). Com uma política rigorosa de qualidade para jogos de empresas parceiras, deu origem a franquias históricas como Super Mario Bros., The Legend of Zelda e Metroid.",
+                    "curva": {
+                        "titulo": "O Renascimento da Indústria Mundial e o Fenômeno dos Clones no Brasil",
+                        "texto": "O lançamento do Family Computer (Famicom) pela Nintendo no Japão em 1983 marcou o início de uma nova época de ouro no entretenimento digital. Para introduzir o aparelho no mercado ocidental sem associá-lo aos videogames antigos que haviam caído em descrédito no Crash de 1983, a Nintendo reformulou o visual do console nos EUA, batizando-o de Nintendo Entertainment System (NES) e dando-lhe a aparência de um eletrodoméstico moderno cinza e sóbrio.\n\nA Nintendo introduziu um modelo de negócios baseado no controle estrito de licenciamento (third-party), exigindo que os estúdios parceiros mantivessem altos padrões de qualidade técnica e narrativa. Foi nessa plataforma que o designer Shigeru Miyamoto criou Super Mario Bros. e The Legend of Zelda, estabelecendo a rolagem lateral de tela (side-scrolling) e a exploração de mundos abertos com salvamento de progresso.\n\nNo Brasil, devido às barreiras de importação da época, o NES só chegou de forma oficial em 1993 pela Playtronic (parceria entre Gradiente e Estrela). No entanto, o público brasileiro já consumia massivamente a tecnologia de 8 bits da Nintendo através dos famosos \"Phantom Clones\" — consoles produzidos por engenharia reversa por empresas nacionais, como o Phantom System (Gradiente), o Dynavision (CCE) e o Top Game. Esses aparelhos permitiram que uma geração inteira de brasileiros explorasse os clássicos da Nintendo antes da chegada oficial da marca.",
+                        "midias": "Texto expositivo + Imagem do Famicom japonês vs. NES ocidental + Fotos dos clones brasileiros (Phantom System, Dynavision)."
+                    },
+                    "modelo": "modelos/NES_embutido.gltf"
+                }
+            },
+            {
+                "sala": "4ª Geração",
+                "ano": "1987–1996",
+                "cor": "#d400ff",
+                "tipo": "cartucho",
+                "tema": "A Era dos 16 Bits, a \"Guerra dos Consoles\" e os Games de Saúde/Ciência",
+                "video": {
+                    "titulo": "AUGE da guerra NINTENDO X SEGA! A história da 4ª geração de consoles – História da Tecnologia",
+                    "fonte": "TecMundo",
+                    "funcao": "Apresenta o confronto dos 16 bits, destacando a evolução gráfica de Sonic the Hedgehog, Super Mario World, Street Fighter II e Donkey Kong Country."
+                },
+                "esq": {
+                    "titulo": "SEGA Mega Drive / Genesis",
+                    "anos": "1988 / 1990",
+                    "fabricante": "SEGA / TecToy",
+                    "geracao": "4ª Geração (16 Bits)",
+                    "ficha": "Processador Motorola 68000 de 16 bits (7.67 MHz) + Zilog Z80; síntese de áudio FM de 10 canais; controles de 3 e 6 botões.",
+                    "texto": "Lançado no Japão em 1988 e no Brasil em 1990 pela TecToy, o Mega Drive inaugurou a era dos 16 bits com gráficos e sons inspirados nas placas de fliperama. Apostando em uma atitude jovem e veloz sob o mascote Sonic the Hedgehog, a SEGA revolucionou o mercado e construiu uma forte presença no Brasil. O console abrigou títulos que exploravam desde corridas velozes até questões ambientais, tornando-se um marco da cultura jovem nos anos 1990.",
+                    "curva": {
+                        "titulo": "A Revolução dos 16 Bits, a Cultura Pop e a Consciência Ecológica",
+                        "texto": "Projetado a partir da arquitetura das famosas placas de arcade System 16 da SEGA, o Mega Drive representou um salto em velocidade de processamento, paleta de cores e fidelidade sonora em relação aos videogames de 8 bits. Nos Estados Unidos, onde foi batizado de Sega Genesis, a empresa adotou campanhas publicitárias provocativas dirigidas ao público adolescente, consolidando a imagem de um console ágil e moderno, a fim de desafiar o domínio de mercado da Nintendo.\n\nNo Brasil, o Mega Drive marcou época pela histórica parceria entre a SEGA e a TecToy. A empresa brasileira promoveu o videogame em programas de TV e revistas infantis, garantindo uma presença duradoura nas salas de estar. O console também se destacou pela retrocompatibilidade com o Master System por meio de adaptadores e pela criação de expansões de hardware, como o leitor de discos Sega CD e o módulo 32X.\n\nAlém dos grandes sucessos de ação e esportes, o catálogo do Mega Drive abrigou títulos do acervo do museu que conectavam o entretenimento a temas sociais e científicos. É o caso de jogos voltados à conscientização ecológica e reciclagem, como Mick & Mack as the Global Gladiators, e à exploração astronômica do Sistema Solar em parceria com séries educativas, como Scholastic's The Magic School Bus.",
+                        "midias": "Texto expositivo + Anúncios da campanha publicitária da SEGA + Encarte do jogo Global Gladiators e Magic School Bus."
+                    },
+                    "modelo": "modelos/SEGA_MEGA_DRIVE_embutido.gltf"
+                },
+                "dir": {
+                    "titulo": "Super Nintendo Entertainment System (SNES)",
+                    "anos": "1990 / 1993",
+                    "fabricante": "Nintendo / Playtronic",
+                    "geracao": "4ª Geração (16 Bits)",
+                    "ficha": "Processador Ricoh 5A22 de 16 bits; chip de som Sony SPC700 de 8 canais; suporte a rotação e escala (Mode 7) e coprocessadores (Super FX).",
+                    "texto": "Lançado em 1990 no Japão como Super Famicom e produzido no Brasil a partir de 1993 pela Playtronic, o Super Nintendo tornou-se um dos videogames mais aclamados da história. Destacou-se pela riqueza de suas cores, trilhas sonoras orquestradas e efeitos de profundidade pseudo-3D (Mode 7). Além de clássicos como Super Mario World, o SNES foi a principal plataforma para serious games voltados à saúde humana, biologia e ecologia.",
+                    "curva": {
+                        "titulo": "Avanço Tecnológico e a Era de Ouro dos Games de Saúde no SNES",
+                        "texto": "O Super Nintendo elevou o nível tecnológico dos videogames de 16 bits ao utilizar processadores auxiliares dedicados para efeitos visuais e áudio de alta fidelidade. O recurso Mode 7 permitia girar e ampliar cenários em tempo real na tela, criando efeitos de perspectiva pseudo-3D. Mais tarde, a inclusão de chips especiais dentro dos próprios cartuchos, como o Super FX, permitiu renderizar gráficos poligonais avançados em títulos como Star Fox, enquanto técnicas de pré-renderização gráfica brilharam em Donkey Kong Country.\n\nNo Brasil, o console foi distribuído oficialmente pela Playtronic (aliança entre a Estrela e a Gradiente), fortalecendo a presença da marca no país e alimentando uma das rivalidades mais marcantes do mercado de tecnologia com a SEGA.\n\nO SNES também serviu de suporte para importantes iniciativas que uniam jogos digitais e saúde humana no acervo do museu. Em parceria com institutos de saúde, o console recebeu títulos desenvolvidos para orientar crianças e jovens sobre a autogestão do diabetes (Captain Novolin e Packy & Marlon) e sobre a prevenção ao tabagismo (Rex Ronan: Experimental Surgeon), além de jogos que abordavam a evolução biológica ao longo das eras geológicas da Terra (E.V.O.: Search for Eden).",
+                        "midias": "Texto expositivo + Imagem da placa de circuito com o chip Super FX + Encartes dos jogos Captain Novolin, Packy & Marlon e Rex Ronan."
+                    },
+                    "modelo": "modelos/SNES_embutido.gltf"
+                }
+            },
+            {
+                "sala": "5ª Geração",
+                "ano": "1993–2001",
+                "cor": "#7b2fff",
+                "tipo": "disco",
+                "tema": "A Revolução Poligonal 3D, a Mídia em CD-ROM e a Estreia da Sony",
+                "video": {
+                    "titulo": "PLAYSTATION vs NINTENDO 64 – A história da guerra que definiu o 3D nos games",
+                    "fonte": "TecMundo",
+                    "funcao": "Apresenta a transição visual dos pixels 2D para os polígonos 3D, demonstrando o salto de câmeras e a chegada dos controles com resposta vibratória."
+                },
+                "esq": {
+                    "titulo": "Sony PlayStation (PS1)",
+                    "anos": "1994",
+                    "fabricante": "Sony Computer Entertainment",
+                    "geracao": "5ª Geração (32 Bits)",
+                    "ficha": "Processador R3000A de 32 bits (33.8 MHz); leitor de CD-ROM de velocidade 2x; controle DualShock com dois direcionais analógicos e vibração.",
+                    "texto": "Lançado no Japão em 1994 e no Ocidente em 1995, o PlayStation marcou a entrada da Sony na indústria de videogames. Projetado sob a liderança de Ken Kutaragi, o console popularizou a mídia em CD-ROM, reduzindo os custos de produção e permitindo trilhas sonoras gravadas e vídeos cinematográficos. O sistema estabeleceu novos padrões para a navegação tridimensional e revolucionou os controles com o lançamento do DualShock, tornando-se o primeiro console de mesa a ultrapassar 100 milhões de unidades vendidas.",
+                    "curva": {
+                        "titulo": "Da Ruptura Comercial à Liderança do Mercado Global",
+                        "texto": "A origem do PlayStation está vinculada a um dos episódios mais célebres da história da tecnologia. No final da década de 1980, a Sony firmou uma parceria com a Nintendo para desenvolver um leitor de CD-ROM para o Super Nintendo. Contudo, devido a divergências sobre os direitos de licenciamento, a Nintendo cancelou publicamente o contrato. Em resposta, o executivo Ken Kutaragi convenceu a diretoria da Sony a transformar o projeto em uma plataforma autônoma, dando origem à divisão Sony Computer Entertainment.\n\nA escolha do CD-ROM como suporte de dados foi um divisor de águas. Enquanto os cartuchos de memória ROM tinham capacidade reduzida e custo elevado, os discos ópticos ofereciam cerca de 650 Megabytes de armazenamento a um valor significativamente menor. Essa abundância de espaço viabilizou a inclusão de animações computadorizadas, dublagens em alta fidelidade e cenários tridimensionais complexos, atraindo de forma maciça os desenvolvedores de jogos e expandindo o público consumidor para adolescentes e adultos.\n\nOutra inovação marcante foi a introdução do cartão de memória removível (Memory Card), que permitia aos jogadores salvar seu progresso individual e transportá-lo para outros aparelhos. Em 1997, a Sony aprimorou a interação tátil ao lançar o controle DualShock, que incorporou dois bastões analógicos para controle preciso de câmeras 3D e motores internos de resposta vibratória. No Brasil, o console popularizou-se amplamente a partir da segunda metade da década de 1990, tornando-se uma presença constante em lares e locadoras de videogames.",
+                        "midias": "Texto de DC + Foto do protótipo da parceria cancelada com a Nintendo + Anúncio de lançamento do PSOne (versão Slim) e Memory Card."
+                    },
+                    "modelo": "modelos/PS1_embutido.gltf"
+                },
+                "dir": {
+                    "titulo": "Nintendo 64 (N64)",
+                    "anos": "1996",
+                    "fabricante": "Nintendo",
+                    "geracao": "5ª Geração (64 Bits)",
+                    "ficha": "Processador NEC VR4300 de 64 bits (93.75 MHz); coprocessador gráfico Silicon Graphics (RCP); mídias em cartuchos de até 64 MB.",
+                    "texto": "Lançado em 1996, o Nintendo 64 destacou-se pela potência de seu processador de 64 bits, desenvolvido em parceria com a Silicon Graphics. Foi o único console de sua geração a manter o uso de cartuchos, garantindo tempos de carregamento virtualmente nulos. O sistema inovou ao introduzir um controle tridente com alavanca analógica central, gatilho traseiro e entrada para periféricos expansíveis, como o Rumble Pak (módulo de vibração), estabelecendo as diretrizes para o movimento de avatares em ambientes tridimensionais.",
+                    "curva": {
+                        "titulo": "A Arquitetura de 64 Bits e a Precisão da Alavanca Analógica",
+                        "texto": "O Nintendo 64 (inicialmente anunciado sob o nome de projeto Ultra 64) representou a aposta da empresa japonesa em um desempenho gráfico bruto para a renderização de ambientes 3D fluidos. A cooperação técnica com a renomada empresa de computação gráfica Silicon Graphics permitiu a aplicação de filtros de suavizado de texturas e iluminação avançada.\n\nA decisão de manter os cartuchos como mídia principal dividiu opiniões. Por um lado, os cartuchos eliminavam as telas de carregamento (loading) e reduziam a vulnerabilidade à pirataria; por outro, sua capacidade de armazenamento limitada em comparação ao CD-ROM restringia o uso de vídeos gravados e elevava os custos de fabricação.\n\nA contribuição mais duradoura do Nintendo 64 para a história da engenharia de interfaces foi o desenho de seu controle. A adição de uma alavanca analógica de alta precisão permitiu graduar a velocidade de deslocamento dos avatares (de um caminhar lento até a corrida rápida) em um espaço tridimensional completo de 360 graus. Além disso, o encaixe posterior do controle permitiu a conexão do Rumble Pak, acessório pioneiro que transmitia vibrações físicas às mãos do jogador em resposta a impactos e explosões na tela, além do Expansion Pak, que expandia a memória RAM do sistema de 4 MB para 8 MB.",
+                        "midias": "Texto de DC + Esquema do controle tridente + Foto do acessório Rumble Pak e das versões com carcaça acrílica transparente (Funtastic Series)."
+                    },
+                    "modelo": "modelos/N64_embutido.gltf"
+                }
+            },
+            {
+                "sala": "6ª Geração",
+                "ano": "1998–2005",
+                "cor": "#2d6bff",
+                "tipo": "disco",
+                "tema": "Mídias de DVD, Arquitetura de PC, Serviços Online e a Entrada da Microsoft",
+                "video": {
+                    "titulo": "A era dos 128-Bits: A HISTÓRIA da 6ª Geração de Consoles!",
+                    "fonte": "TecMundo",
+                    "funcao": "Apresenta a evolução dos gráficos na virada do milênio, a consolidação da mídia em DVD, a entrada da Microsoft e o início das partidas multijogador via internet."
+                },
+                "esq": {
+                    "titulo": "Sony PlayStation 2 (PS2)",
+                    "anos": "2000",
+                    "fabricante": "Sony Computer Entertainment",
+                    "geracao": "6ª Geração (128 Bits)",
+                    "ficha": "Processador Emotion Engine de 128 bits (294.9 MHz); leitor de DVD-ROM/CD-ROM; suporte a retrocompatibilidade e portas USB.",
+                    "texto": "Lançado no Japão em 2000, o PlayStation 2 é o console de mesa mais vendido de todos os tempos, alcançando a marca de 160 milhões de unidades. Seu enorme sucesso comercial deveu-se à inclusão de um leitor de filmes em DVD com custo acessível para os lares, somado à retrocompatibilidade total com os jogos e controles do primeiro PlayStation. No Brasil, o aparelho tornou-se um fenômeno popular absoluto, mantendo sua produção e apelo cultural por mais de uma década.",
+                    "curva": {
+                        "titulo": "A Consolidação da Central Multimídia Doméstica e o Fenômeno Brasileiro",
+                        "texto": "O PlayStation 2 redefiniu o papel dos videogames na estrutura familiar. Ao incorporar um leitor de DVD nativo em uma época em que os aparelhos de DVD de mesa ainda eram caros, a Sony posicionou o console como um centro de entretenimento para toda a casa, capaz de reproduzir filmes, músicas e jogos em um único dispositivo.\n\nDo ponto de vista da arquitetura de hardware, a CPU batizada de Emotion Engine permitiu avanços significativos no processamento de física, iluminação dinâmica e expressões faciais em modelos 3D. A inclusão de portas USB e de rede expandiu as possibilidades de periféricos, dando origem a acessórios inovadores como a câmera EyeToy (que capturava os movimentos do corpo do jogador sem a necessidade de controles) e os microfones da linha de karaokê SingStar.\n\nNo contexto sociocultural brasileiro, o PS2 construiu uma trajetória única. Embora o lançamento oficial pela Sony no país tenha ocorrido apenas em 2009, o console foi amplamente difundido ao longo dos anos 2000 por meio do mercado de importação. A facilidade de instalação de chips de desbloqueio (como o popular Matrix) permitiu o acesso em massa a mídias de baixo custo, impulsionando modificações culturais locais, como as famosas edições brasileiras de simulação de futebol, e consolidando o PS2 em locadoras e estabelecimentos comerciais de todo o país até o encerramento de sua fabricação mundial em 2013.",
+                        "midias": "Texto de DC + Foto do PS2 Slim + Anúncio de acessórios periféricos (câmera EyeToy e microfones SingStar)."
+                    },
+                    "modelo": "modelos/PS2_embutido.gltf"
+                },
+                "dir": {
+                    "titulo": "Microsoft Xbox",
+                    "anos": "2001",
+                    "fabricante": "Microsoft",
+                    "geracao": "6ª Geração (128 Bits)",
+                    "ficha": "Processador Intel Pentium III (733 MHz); placa gráfica Nvidia NV2A; Disco Rígido (HD) interno embutido de 8 GB; porta de rede Ethernet nativa.",
+                    "texto": "Revelado em 2001 por Bill Gates, o Xbox marcou a estreia oficial da Microsoft no mercado de consoles domésticos. Projetado com uma arquitetura derivada dos computadores pessoais (baseada em DirectX), foi o videogame mais potente de sua geração. Inovou na indústria ao incorporar um Disco Rígido (HD) interno, eliminando a necessidade de cartões de memória externos, e ao estabelecer a rede Xbox Live, serviço pioneiro que estruturou o jogo multijogador online com servidores dedicados e lista de amigos.",
+                    "curva": {
+                        "titulo": "A Arquitetura de PC e a Fundação das Redes Online Modernas",
+                        "texto": "O desenvolvimento do Xbox teve início quando uma equipe de engenheiros da Microsoft adaptou as ferramentas de programação gráfica DirectX, da qual o console herdou seu nome, para criar um hardware dedicado a jogos capaz de rivalizar com o domínio japonês da Sony e da Nintendo.\n\nO console trouxe especificações técnicas inspiradas nos computadores de alto desempenho da época, incluindo um processador Intel Pentium III e um coprocessador gráfico da Nvidia. A inclusão de um Disco Rígido (HD) interno de 8 Gigabytes foi uma cartada pioneira: além de permitir o armazenamento de partidas salvas sem depender de Memory Cards, o HD possibilitava copiar faixas de música de CDs para uso como trilhas sonoras personalizadas dentro dos jogos e reduzia significativamente os tempos de carregamento de cenários.\n\nEm 2002, a Microsoft lançou o serviço Xbox Live, que estabeleceu os pilares da conectividade online nos consoles modernos. Através da porta de rede Ethernet integrada ao aparelho, os jogadores podiam se conectar à internet em banda larga, criar perfis de usuário padronizados, organizar listas de amigos e comunicar-se em tempo real por áudio por meio de fones de ouvido (headsets). Essa infraestrutura online sólida pavimentou o caminho para a consolidação da Microsoft como uma das grandes potências do setor nas gerações subsequentes.",
+                        "midias": "Texto de DC + Foto de Bill Gates na apresentação do console + Esquema do painel da rede Xbox Live e do controle Duke."
+                    }
+                }
+            },
+            {
+                "sala": "7ª Geração",
+                "ano": "2005–2012",
+                "cor": "#00b3ff",
+                "tipo": "disco",
+                "tema": "Alta Definição (HD), Mídia em Blu-Ray, Redes Online Consolidadas e Sensores de Movimento",
+                "video": {
+                    "titulo": "",
+                    "fonte": "",
+                    "funcao": "Exibição sintética da transição para a alta definição e da popularização dos sensores de movimento (Kinect, Move e Wii Mote)."
+                },
+                "esq": {
+                    "titulo": "Microsoft Xbox 360",
+                    "anos": "2005",
+                    "fabricante": "Microsoft",
+                    "geracao": "7ª Geração",
+                    "ficha": "Processador de triplo núcleo Xenon (3.2 GHz); GPU ATI Xenos; suporte à alta definição (720p/1080i); serviço Xbox Live integrado.",
+                    "texto": "Lançado no final de 2005, o Xbox 360 inaugurou a sétima geração e a era da computação gráfica em alta definição nos consoles. O sistema consolidou o modelo de distribuição digital de jogos e o sistema de pontuação por \"conquistas\" (achievements) atrelado ao perfil do jogador. Em 2010, o console revolucionou a captura de movimentos com o lançamento do Kinect, periférico dotado de câmeras infravermelhas que permitia jogar utilizando apenas o próprio corpo como controle.",
+                    "curva": {
+                        "titulo": "A Era da Alta Definição, Distribuição Digital e a Captura sem Controles",
+                        "texto": "O Xbox 360 representou o amadurecimento da Microsoft no mercado de hardware. Ao anteceder seus concorrentes diretos no lançamento mundial, o console estabeleceu os novos padrões visuais da indústria com a exibição de gráficos em alta definição (HD) nas TVs de tela plana de plasma e LCD.\n\nA plataforma expandiu substancialmente a experiência da Xbox Live, transformando-a em uma rede social integrada. Pela primeira vez em um console, os jogadores podiam adquirir títulos independentes via Xbox Live Arcade, baixar demonstrações, conversar em grupo por áudio e acumular pontuações de perfil compartilhadas entre diferentes jogos. Franquias como Halo e Gears of War tornaram-se marcos técnicos ao demonstrar o potencial da iluminação dinâmica e do multijogador em rede.\n\nNa segunda metade da geração, para rivalizar com a popularidade dos controles por movimento, a Microsoft introduziu o Kinect. Equipado com sensores de profundidade e reconhecimento de voz, o dispositivo eliminou os joysticks tradicionais, rastreando o esqueleto tridimensional do usuário em tempo real. Essa tecnologia estendeu o alcance do console para novos públicos e abriu espaço para pesquisas acadêmicas e aplicações medicinais e educativas fora do campo do entretenimento.",
+                        "midias": "Texto de DC + Foto do sensor Kinect + Diagrama do perfil na Xbox Live."
+                    },
+                    "acervoMGC": true
+                },
+                "dir": {
+                    "titulo": "Sony PlayStation 3 (PS3)",
+                    "anos": "2006",
+                    "fabricante": "Sony Computer Entertainment",
+                    "geracao": "7ª Geração",
+                    "ficha": "Processador Cell Broadband Engine de múltiplos núcleos; leitor nativo de mídias Blu-Ray Disc; saída HDMI em Full HD (1080p); rede PlayStation Network.",
+                    "texto": "Lançado em 2006, o PlayStation 3 destacou-se pela arquitetura avançada de seu processador Cell, desenvolvido em parceria com a IBM e Toshiba. O console foi o principal responsável pela vitória do formato de disco óptico Blu-Ray sobre o HD-DVD, oferecendo capacidade de armazenamento de até 50 GB. O PS3 introduziu a conectividade Wi-Fi nativa, a rede gratuita PlayStation Network e controles sem fio com sensores de movimento (Sixaxis e PlayStation Move), abrigando narrativas cinematográficas de grande impacto.",
+                    "curva": {
+                        "titulo": "O Processamento Paralelo do Cell e a Era das Mídias Blu-Ray",
+                        "texto": "A concepção do PlayStation 3 esteve ancorada na busca pelo desempenho de supercomputação em um dispositivo doméstico. Seu processador, o Cell Broadband Engine, contava com um núcleo principal e múltiplos elementos de processamento vetorial (SPEs), permitindo simulações de física complexas, física de tecidos e renderizações altamente detalhadas em tempo real.\n\nA aposta da Sony no leitor de Blu-Ray Disc provou-se decisiva. A enorme capacidade dos discos ópticos permitiu incluir arquivos de áudio não compactado, dublagens em múltiplos idiomas e texturas em altíssima resolução sem a necessidade de dividir os jogos em vários discos. Essa infraestrutura deu suporte ao surgimento de experiências com forte apelo cinematográfico e fotorrealismo, exemplificadas por franquias como Uncharted e The Last of Us.\n\nParalelamente, o ecossistema do console integrou a navegação na PlayStation Network (PSN), permitindo o acesso a lojas digitais e navegadores de internet. Para além do controle tradicional DualShock 3, a Sony lançou em 2010 o PlayStation Move, bastão equipado com uma esfera luminosa rastreada pela câmera PlayStation Eye, oferecendo precisão milimétrica para jogos de simulação esportiva e interatividades didáticas.",
+                        "midias": "Texto de DC + Foto da mídia Blu-Ray vs. DVD + Foto do controle PlayStation Move e modelo PS3 Slim."
+                    },
+                    "modelo": "modelos/PS3_embutido.gltf",
+                    "acervoMGC": true
+                }
+            },
+            {
+                "sala": "8ª Geração",
+                "ano": "2012–2020",
+                "cor": "#00e5c0",
+                "tipo": "disco",
+                "tema": "Convergência x86, Hibridismo de Telas, Realidade Virtual e Streaming",
+                "video": {
+                    "titulo": "",
+                    "fonte": "",
+                    "funcao": "Exibição da convergência dos consoles com redes de streaming, hibridismo e a chegada dos dispositivos de Realidade Virtual (PSVR)."
+                },
+                "esq": {
+                    "titulo": "Nintendo Switch / Wii U",
+                    "anos": "2012 / 2017",
+                    "fabricante": "Nintendo",
+                    "geracao": "8ª Geração",
+                    "ficha": "Processador customizado Nvidia Tegra X1; tela tátil integrada; controles destacados Joy-Con com giroscópio e vibração HD Rumble.",
+                    "texto": "A oitava geração da Nintendo iniciou-se em 2012 com o Wii U e seu controle GamePad de duas telas, culminando em 2017 com o revolucionário Nintendo Switch. O Switch redefiniu o conceito de console ao unir a jogabilidade de mesa à portabilidade total em um único aparelho híbrido. Equipado com os controles destacáveis Joy-Con, o sistema permite alternar instantaneamente entre a exibição no televisor e a tela portátil, atingindo marcas históricas de vendas em todo o mundo.",
+                    "curva": {
+                        "titulo": "A Evolução do Hibridismo e a Reconfiguração dos Espaços de Jogo",
+                        "texto": "A trajetória da Nintendo na oitava geração refletiu uma busca contínua por integrar telas secundárias e novas formas de interatividade. O Wii U introduziu o GamePad, que permitia jogar mesmo com a TV desligada e oferecia dinâmicas de \"assimetria\", onde o jogador com o tablet enxergava informações diferentes dos demais participantes na sala.\n\nAs lições do Wii U serviram de alicerce para o desenvolvimento do Nintendo Switch. Ao adotar o formato híbrido, a Nintendo eliminou a barreira histórica entre os consoles domésticos e os portáteis. O aparelho pode ser utilizado encaixado na base (Dock) conectado à TV ou transportado livremente como um dispositivo de mão.\n\nOs controles Joy-Con incorporaram acelerômetros, giroscópios, câmera infravermelha de movimento e o motor de vibração de alta fidelidade HD Rumble, capaz de simular sensações táteis sutis (como o toque de esferas dentro de uma caixa). A versatilidade do Switch permitiu criar propostas educativas inovadoras, como o Nintendo Labo — projeto no qual os usuários constroem estruturas de papelão (Toy-Cons) e as integram aos sensores do videogame para compreender princípios básicos de física, mecânica e programação.",
+                        "midias": "Texto de DC + Foto do modo Dock vs. modo Portátil do Switch + Esquema dos sensores do Joy-Con e kit Nintendo Labo."
+                    },
+                    "modelo": "modelos/NWII_embutido.gltf"
+                },
+                "dir": {
+                    "titulo": "Sony PlayStation 4 (PS4)",
+                    "anos": "2013",
+                    "fabricante": "Sony Interactive Entertainment",
+                    "geracao": "8ª Geração",
+                    "ficha": "Arquitetura x86-64 AMD Jaguar de 8 núcleos; 8 GB de memória GDDR5 unificada; controle DualShock 4 com painel tátil e botão Share.",
+                    "texto": "Lançado no final de 2013, o PlayStation 4 marcou a padronização dos consoles em direção à arquitetura de computadores pessoais (x86), facilitando o desenvolvimento de jogos. O console destacou-se pela integração nativa com redes sociais através do botão Share no controle DualShock 4, que permitia transmitir partidas e capturar imagens instantaneamente. O PS4 tornou-se um dos consoles de mesa mais vendidos da história, servindo também de base para a estreia da Realidade Virtual doméstica com o óculos PlayStation VR (PSVR).",
+                    "curva": {
+                        "titulo": "Arquitetura Unificada, Criação de Conteúdo Social e a Estreia da VR",
+                        "texto": "Para a criação do PlayStation 4, a Sony abandonou a complexa arquitetura proprietária do PS3 e adotou uma estrutura similar à dos computadores de alto desempenho, combinando processador e placa gráfica da AMD com uma memória GDDR5 de alta velocidade. Essa mudança facilitou o trabalho dos desenvolvedores e garantiu um fluxo contínuo de lançamentos de grande porte e de estúdios independentes (indies).\n\nO PS4 colocou a conectividade social no centro da experiência. O controle DualShock 4 incorporou um painel tátil (touchpad), uma barra de iluminação frontal e o inédito botão SHARE, que permitiu aos próprios jogadores transformarem-se em criadores de conteúdo, realizando transmissões ao vivo na internet e compartilhando capturas de vídeo em tempo real.\n\nEm 2016, a plataforma expandiu as fronteiras do entretenimento ao lançar o PlayStation VR (PSVR), primeiro sistema de Realidade Virtual de grande escala desenvolvido para consoles de mesa. Ao conectar o óculos imersivo ao PS4, o sistema abriu caminho para a navegação tridimensional em 360 graus, antecedendo os conceitos de imersão que fundamentam as pesquisas atuais em ambientes virtuais e museus imersivos.",
+                        "midias": "Texto de DC + Foto do headset PSVR + Interface de transmissão social do botão Share."
+                    },
+                    "modelo": "modelos/PS4_embutido.gltf"
+                }
+            },
+            {
+                "sala": "9ª Geração",
+                "ano": "2020–Presente",
+                "cor": "#39ff14",
+                "tipo": "disco",
+                "tema": "Fotorrealismo, Ray Tracing, Unidades SSD Ultrarrápidas e Resposta Tátil Avançada",
+                "video": {
+                    "titulo": "",
+                    "fonte": "",
+                    "funcao": "Exibição da fotorrealidade, iluminação Ray Tracing e da velocidade de carregamento instantâneo das plataformas atuais."
+                },
+                "esq": {
+                    "titulo": "Sony PlayStation 5 (PS5)",
+                    "anos": "2020",
+                    "fabricante": "Sony Interactive Entertainment",
+                    "geracao": "9ª Geração",
+                    "ficha": "CPU AMD Zen 2; GPU RDNA 2 com suporte a Ray Tracing; disco SSD de altíssima velocidade (5.5 GB/s); controle DualSense.",
+                    "texto": "Lançado no final de 2020, o PlayStation 5 inaugurou a nona geração de consoles marcando o salto para o fotorrealismo e para a eliminação das telas de carregamento. Sua unidade de armazenamento em estado sólido (SSD) customizada permite transferir dados a velocidades ultrarrápidas, redefinindo o level design em mundos virtuais abertos. O console introduziu o controle DualSense, que proporciona resposta háptica precisa e gatilhos adaptáveis que alteram a resistência física ao toque dos dedos.",
+                    "curva": {
+                        "titulo": "A Arquitetura de SSD, o Iluminamento Ray Tracing e a Imersão Háptica",
+                        "texto": "A concepção do PlayStation 5 trouxe uma mudança estrutural na forma como os dados de um jogo são acessados pelo hardware. Ao substituir os tradicionais Discos Rígidos (HDDs) mecânicos por uma unidade SSD de alta velocidade integrada diretamente à placa-mãe, o PS5 reduziu o tempo de carregamento de cenários de dezenas de segundos para frações de segundo. Isso permitiu aos criadores projetar ambientes virtuais com nível inédito de detalhamento e transições de cenários instantâneas.\n\nNa dimensão gráfica, o suporte a Ray Tracing por hardware viabilizou a simulação física do comportamento da luz, gerando reflexos em tempo real, refrações transparentes e sombras suaves de alta fidelidade visual.\n\nA grande inovação sensorial do PS5 reside no controle DualSense. O dispositivo substituiu os antigos motores de vibração por atuadores hápticos duplos, capazes de transmitir sensações táteis refinadas às mãos do jogador (como a textura de caminhar sobre chuva, areia ou metal). Além disso, os gatilhos traseiros (L2 e R2) incorporam mecanismos com resistência dinâmica ajustável via código, simulando a tensão do cabo de um arco ou a pressão de um freio, elevando o grau de imersão sensorial na interação homem-máquina.",
+                        "midias": "Texto de DC + Foto da estrutura do controle DualSense com gatilhos dinâmicos + Demonstração do efeito de Ray Tracing e iluminação em tempo real."
+                    },
+                    "modelo": "modelos/PS5_embutido.gltf"
+                },
+                "dir": {
+                    "titulo": "Microsoft Xbox Series X / Series S",
+                    "anos": "2020",
+                    "fabricante": "Microsoft",
+                    "geracao": "9ª Geração",
+                    "ficha": "Processador AMD Zen 2 de 8 núcleos; GPU RDNA 2 (12 TFLOPS no Series X); SSD com arquitetura Xbox Velocity; recurso Quick Resume.",
+                    "texto": "Lançados simultaneamente em novembro de 2020, o Xbox Series X e o Series S representam a estratégia de duas vias da Microsoft para a nona geração. O Series X destaca-se como o console de maior poder gráfico bruto de sua época (12 Teraflops), focado no fotorrealismo e taxas de quadros de até 120 FPS. A plataforma destaca-se pela ampla retrocompatibilidade com quatro gerações de consoles da marca, pelo recurso Quick Resume (que alterna entre múltiplos jogos suspensos) e pela expansão do ecossistema de jogos via nuvem.",
+                    "curva": {
+                        "titulo": "A Arquitetura Velocity, Retrocompatibilidade Preservacionista e Computação em Nuvem",
+                        "texto": "O Xbox Series X foi projetado com uma arquitetura de arrefecimento vertical e poder de processamento bruto de 12 Teraflops, visando executar jogos em resolução 4K nativa e altas taxas de atualização de quadros. Em contrapartida, o Series S foi lançado como uma versão digital compacta e acessível voltada para a resolução 1440p, democratizando o acesso à nova geração.\n\nAmbos os consoles compartilham a Xbox Velocity Architecture, ecossistema composto pelo SSD customizado e algoritmos de compressão de memória. Essa infraestrutura permitiu a criação do recurso Quick Resume, funcionalidade que congela o estado de múltiplos jogos na memória SSD, permitindo ao usuário alternar instantaneamente entre diferentes títulos exatamente do ponto onde parou.\n\nSob a perspectiva da Preservação da Memória Tecnológica e da Museologia Digital, a Microsoft destacou-se por implementar uma política de retrocompatibilidade abrangente. Os novos consoles são capazes de executar jogos originários de todas as gerações anteriores (Xbox original, 360 e Xbox One) com melhorias automáticas de resolução, cor e taxa de quadros. Além disso, a integração com o Cloud Gaming permite transmitir e jogar títulos de última geração através da internet em dispositivos móveis e computadores modestos, consolidando a convergência definitiva entre o hardware dedicado e a nuvem.",
+                        "midias": "Texto de DC + Comparativo técnico entre Series X e Series S + Esquema da arquitetura Xbox Velocity e jogos via nuvem (Cloud Gaming)."
+                    }
+                }
+            },
+            {
+                "sala": "Em Construção",
+                "ano": "Futuro",
+                "cor": "#00fff2",
+                "tipo": "vazio",
+                "esq": {
+                    "titulo": "",
+                    "texto": ""
+                },
+                "dir": {
+                    "titulo": "",
+                    "texto": ""
+                }
+            }
+        ];
+
+        function texturaGridNeon(corLinha) {
+            var c = document.createElement('canvas');
+            c.width = 256; c.height = 256;
+            var ctx = c.getContext('2d');
+            ctx.fillStyle = '#05010f';
+            ctx.fillRect(0, 0, 256, 256);
+            ctx.strokeStyle = corLinha;
+            ctx.lineWidth = 4;
+            ctx.shadowColor = corLinha;                
+            ctx.shadowBlur = 10;
+            ctx.beginPath();
+            ctx.moveTo(0, 0); ctx.lineTo(256, 0);
+            ctx.moveTo(0, 0); ctx.lineTo(0, 256);
+            ctx.stroke();
+            return c.toDataURL();
+        }
+
+        AFRAME.registerComponent('piso-neon', {
+            schema: { cor: { default: '#00fff2' }, repeat: { default: '8 8' } },
+            init: function () { this.aplicarTextura(); },
+            update: function (oldData) {
+                if (oldData.cor !== this.data.cor || oldData.repeat !== this.data.repeat) this.aplicarTextura();
+            },
+            aplicarTextura: function() {
+                this.el.setAttribute('material', { shader: 'flat', src: texturaGridNeon(this.data.cor), repeat: this.data.repeat });
+            }
+        });
+
+        // ==========================================
+        // PROXIMIDADE ATUALIZADA
+        // ==========================================
+        AFRAME.registerComponent('painel-proximidade', {
+            init: function () {
+                this.ativo = false;
+                this.worldPosJogador = new THREE.Vector3();
+                this.posLocal = new THREE.Vector3();
+                this.jogadorEl = document.querySelector('#camera-jogador');
+            },
+            tick: function () {
+                // el.painelRef = entidade com o componente 'painel-expansivel' deste pedestal
+                var ref = this.el.painelRef;
+                var painel = ref && ref.components && ref.components['painel-expansivel'];
+                if (!this.jogadorEl || !painel) return;
+
+                this.jogadorEl.object3D.getWorldPosition(this.worldPosJogador);
+                this.posLocal.copy(this.worldPosJogador);
+                this.el.object3D.worldToLocal(this.posLocal);
+
+                var eixoZTestado = this.posLocal.z - 2.0;
+                var a = 3.0;
+                var b = 5.0;
+                var dentroElipse = ((this.posLocal.x * this.posLocal.x) / (a * a)) + ((eixoZTestado * eixoZTestado) / (b * b)) <= 1.0;
+
+                if (dentroElipse && !this.ativo) {
+                    this.ativo = true;
+                    painel.mostrar();
+                } else if (!dentroElipse && this.ativo) {
+                    this.ativo = false;
+                    painel.ocultar(); // também recolhe a tela expandida
+                }
+            }
+        });
+
+        // ==========================================
+        // PAINEL EXPANSIVEL: a tela pequena e a tela curva são o MESMO elemento.
+        // Estado 0 = placa plana pequena (título, texto e botão "Saiba mais") ao lado do pedestal.
+        // Estado 1 = painel curvo 16:9 na parede da exêdra, com a imagem do console e o botão "Ver menos".
+        // A malha é interpolada vértice a vértice entre as duas formas (plano -> cilindro).
+        // Todas as posições estão no espaço do grupo da exêdra (grupoCont).
+        // ==========================================
+        AFRAME.registerComponent('painel-expansivel', {
+            schema: {
+                cor: { default: '#00fff2' },
+                imagemPequena: { default: '' },      //nova propriedade Canva (4:3)
+                imagem: { default: '' },             //Imagem da Tela curva (Canva 16:9)
+                titulo: { default: '' },
+                anos: { default: '' },
+                fabricante: { default: '' },
+                geracao: { default: '' },
+                ficha: { default: '' },
+                texto: { default: '' },
+                tituloCurva: { default: '' },        // título do texto de aprofundamento (tela curva)
+                textoCurva: { default: '' },         // texto de divulgação científica (tela curva)
+                rot: { default: 0 },                 // giro Y do pedestal e da placa pequena (graus)
+                rotCurva: { default: 0 },            // giro Y do painel curvo (graus)
+                px: { default: 0 }, pz: { default: 0 }, pyPequeno: { default: 3.3 },
+                larguraPequena: { default: 2.4 }, alturaPequena: { default: 1.8 },  //Ajustado para 4:3
+                raio: { default: 6 },                // raio da parede curva
+                recuoTexto: { default: 0.03 },       // afastamento do texto à frente da tela curva (m); aumente se houver z-fighting
+                centroYCurva: { default: 3.2 }, alturaCurva: { default: 3.2 },
+                duracao: { default: 650 }            // ms da transição
+            },
+            init: function () {
+                var self = this, d = this.data;
+                // Placa pequena: com imagem (4:3) usa larguraPequena x alturaPequena; só com texto precisa de mais altura
+                this.Wp = d.imagemPequena ? d.larguraPequena : Math.max(d.larguraPequena, 2.5);
+                this.Hp = d.imagemPequena ? d.alturaPequena : Math.max(d.alturaPequena, 2.1);
+                this.t = 0; this.alvo = 0;           // t: 0 = pequeno, 1 = curvo
+                this.vis = 0; this.visAlvo = 0;      // vis: fade geral do painel
+                this.SEG = 48;
+                this.rotRad = d.rot * Math.PI / 180;            // placa pequena
+                this.rotRadC = d.rotCurva * Math.PI / 180;      // tela curva
+                // 16:9 exato: largura do arco = altura * 16/9  ->  ângulo = largura / raio
+                this.arcoRad = (d.alturaCurva * 16 / 9) / d.raio;
+                this.tmp = [0, 0, 0];
+
+                var grupo = new THREE.Group();
+                var criarGeo = function () {
+                    var g = new THREE.BufferGeometry();
+                    var n = (self.SEG + 1) * 2, uvs = new Float32Array(n * 2), idx = [];
+                    for (var i = 0; i <= self.SEG; i++) {
+                        uvs.set([i / self.SEG, 0, i / self.SEG, 1], i * 4);
+                        if (i < self.SEG) { var a = i * 2; idx.push(a, a + 1, a + 2, a + 1, a + 3, a + 2); }
+                    }
+                    g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(n * 3), 3));
+                    g.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+                    g.setIndex(idx);
+                    return g;
+                };
+                var criarMalha = function (mat, ordem) {
+                    var m = new THREE.Mesh(criarGeo(), mat);
+                    m.renderOrder = ordem; m.frustumCulled = false;
+                    grupo.add(m); return m;
+                };
+                var matBase = function (cor, op) {
+                    return new THREE.MeshBasicMaterial({ color: cor, transparent: true, opacity: op, side: THREE.DoubleSide, depthWrite: false });
+                };
+                this.mMoldura = criarMalha(matBase(new THREE.Color(d.cor), 0), 1);
+                this.mFundo = criarMalha(matBase(new THREE.Color('#06060f'), 0), 2);
+
+                // Texturas das placas. Cada uma registra no console (F12) se carregou ou falhou, com a URL:
+                // se uma imagem não aparece, procure por "[museu-vr] imagem" e confira o caminho/nome do arquivo.
+                this.textoCurvoAtivo = !d.imagem;           // sem imagem 16:9 (ou se ela falhar), a tela curva mostra o texto
+                var carregarTextura = function (url, rotulo, aoFalhar) {
+                    var ld = new THREE.TextureLoader(); ld.setCrossOrigin('anonymous');
+                    var tx = ld.load(url,
+                        function () { console.log('[museu-vr] imagem carregada (' + rotulo + '): ' + url); },
+                        undefined,
+                        function () { console.error('[museu-vr] imagem NÃO carregou (' + rotulo + '): ' + url + ' — confira o caminho e o nome do arquivo (maiúsculas/minúsculas contam).'); if (aoFalhar) aoFalhar(); });
+                    if (THREE.sRGBEncoding !== undefined) tx.encoding = THREE.sRGBEncoding;
+                    else if (THREE.SRGBColorSpace) tx.colorSpace = THREE.SRGBColorSpace;
+                    return tx;
+                };
+                // Imagem 16:9 da tela curva (placa pronta)
+                this.mImg = null;
+                if (d.imagem) {
+                    var matImg = matBase(0xffffff, 0); matImg.map = carregarTextura(d.imagem, 'tela curva', function () { self.textoCurvoAtivo = true; }); matImg.toneMapped = false;
+                    this.mImg = criarMalha(matImg, 3);
+                }
+                // Imagem 4:3 da placa frontal. Fica acima de tudo (renderOrder 4): as duas são transparentes
+                // e, com a mesma ordem, a que aparece por cima seria indefinida.
+                this.mImgPeq = null;
+                if (d.imagemPequena) {
+                    var matImgP = matBase(0xffffff, 0); matImgP.map = carregarTextura(d.imagemPequena, 'placa frontal'); matImgP.toneMapped = false;
+                    this.mImgPeq = criarMalha(matImgP, 4);
+                }
+
+                this.el.setObject3D('painel-malha', grupo);
+                this.grupoMalha = grupo; grupo.visible = false;
+
+                // ----- Conteúdo da placa pequena (mesmo posicionamento do pedestal) -----
+                var mk = function (tag, attrs, pai) {
+                    var e = document.createElement(tag);
+                    for (var k in attrs) e.setAttribute(k, attrs[k]);
+                    if (pai) pai.appendChild(e); return e;
+                };
+                this.grpPeq = mk('a-entity', { position: d.px + ' ' + d.pyPequeno + ' ' + d.pz, rotation: '0 ' + d.rot + ' 0', visible: 'false' }, this.el);
+                // Texto da placa: título + linha do fabricante + ficha técnica + discurso expositivo.
+                // Os textos vão como OBJETO (e não como string "chave: valor; ...") porque contêm ';' e ':'.
+                var W = this.Wp, H = this.Hp, margem = 0.12;
+                // O nome do console agora fica na placa fixa do pedestal; aqui só fabricante + ficha + discurso.
+                // ATENÇÃO: no aframe-troika-text os pontos de ancoragem são 'anchor' (horizontal) e 'baseline'
+                // (vertical) — 'anchorX'/'anchorY' são ignorados e o texto fica centrado (era isso que o
+                // deslocava para fora da placa).
+                // Só o fabricante (colorido) fica na placa pequena, na linha do botão "Saiba mais", à esquerda dele.
+                var yCorpo = H / 2 - 0.12;
+                var xEsq = -W / 2 + margem, larguraTxt = W - 2 * margem;
+                
+                //Só cria o texto nativo frontal se NÃO houver imagemPequena do Canva
+                if(!d.imagemPequena){
+                    mk('a-entity', { 'troika-text': { value: 'Ficha técnica: ' + d.ficha + '\n\n' + d.texto, color: '#ffffff', fontSize: 0.07, maxWidth: larguraTxt, lineHeight: 1.25, align: 'left', anchor: 'left', baseline: 'top' }, position: xEsq + ' ' + yCorpo + ' 0.03' }, this.grpPeq);
+                    mk('a-entity', { 'troika-text': { value: 'Fabricante: ' + d.fabricante, color: d.cor, fontSize: 0.062, maxWidth: larguraTxt - 0.62 - 0.12, align: 'left', anchor: 'left', baseline: 'middle' }, position: xEsq + ' ' + (-H / 2 + 0.14) + ' 0.03' }, this.grpPeq);
+                }
+                // Botão "Saiba mais" no canto inferior direito da placa pequena
+                this.btnMais = this.criarBotao(this.grpPeq, 'SAIBA MAIS', 0.62, 0.18, 0.075, (W / 2 - 0.38).toFixed(3) + ' ' + (-H / 2 + 0.14).toFixed(3) + ' 0.04', function () {
+                    if (self.vis > 0.9 && self.t < 0.05) self.expandir();
+                });
+
+                // Botão "Ver menos" no canto inferior direito do painel curvo
+                var u = 0.41, v = -0.42, phi = u * this.arcoRad;
+                this.superficie(u, v, 1, 0.04, this.tmp);
+                this.grpGrande = mk('a-entity', {
+                    position: this.tmp[0].toFixed(3) + ' ' + this.tmp[1].toFixed(3) + ' ' + this.tmp[2].toFixed(3),
+                    rotation: '0 ' + (d.rotCurva - phi * 180 / Math.PI).toFixed(3) + ' 0', visible: 'false'
+                }, this.el);
+                // Texto da tela curva: título + divulgação científica.
+                // O Troika curva o texto em torno da ÂNCORA (aqui, a borda esquerda do bloco) com
+                // curveRadius POSITIVO (centro do cilindro à frente do texto, pois quem lê está dentro
+                // da exêdra). Para o texto coincidir com a tela, o grupo é colocado no ponto REAL da
+                // superfície, na borda esquerda do bloco, girado para encarar o centro da exêdra, e o
+                // curveRadius é o raio efetivo naquela posição (raio - recuo).
+                var recuo = d.recuoTexto;
+                var curva = d.raio - recuo;                                   // raio efetivo do texto
+                var arcoLen = d.alturaCurva * 16 / 9, larguraC = arcoLen - 0.5;
+                var phi0 = -larguraC / (2 * curva);                           // ângulo da borda esquerda (bloco centrado)
+                this.superficie(phi0 / this.arcoRad, 0, 1, recuo, this.tmp);
+                this.grpTexto = mk('a-entity', {
+                    position: this.tmp[0].toFixed(3) + ' ' + this.tmp[1].toFixed(3) + ' ' + this.tmp[2].toFixed(3),
+                    rotation: '0 ' + (d.rotCurva - phi0 * 180 / Math.PI).toFixed(3) + ' 0', visible: 'false'
+                }, this.el);
+                var yC = d.alturaCurva / 2 - 0.16;
+                var linhasTituloC = Math.max(1, Math.ceil(d.tituloCurva.length / 50));  // estimativa p/ fonte 0.17
+                
+                if (d.tituloCurva) {
+                    mk('a-entity', { 'troika-text': { value: d.tituloCurva, color: d.cor, fontSize: 0.17, maxWidth: larguraC, align: 'left', anchor: 'left', baseline: 'top', curveRadius: curva }, position: '0 ' + yC + ' 0' }, this.grpTexto);
+                    if (d.textoCurva) mk('a-entity', { 'troika-text': { value: d.textoCurva, color: '#ffffff', fontSize: 0.09, maxWidth: larguraC, lineHeight: 1.25, align: 'left', anchor: 'left', baseline: 'top', curveRadius: curva }, position: '0 ' + (yC - 0.2 * linhasTituloC - 0.1) + ' 0' }, this.grpTexto);
+                }
+                this.btnMenos = this.criarBotao(this.grpGrande, 'VER MENOS', 0.8, 0.24, 0.1, '0 0 0', function () {
+                    if (self.t > 0.95) self.colapsar();
+                });
+            },
+            criarBotao: function (pai, rotulo, w, h, fonte, pos, aoClicar) {
+                var d = this.data;
+                var btn = document.createElement('a-plane');
+                btn.setAttribute('width', w); btn.setAttribute('height', h);
+                btn.setAttribute('position', pos);
+                btn.setAttribute('material', 'shader: flat; color: ' + d.cor);
+                btn.classList.add('interactable');
+                var txt = document.createElement('a-entity');
+                txt.setAttribute('troika-text', 'value: ' + rotulo + '; color: #05010f; align: center; fontSize: ' + fonte + '; maxWidth: ' + w);
+                txt.setAttribute('position', '0 0 0.01');
+                btn.appendChild(txt);
+                btn.addEventListener('click', aoClicar);
+                btn.addEventListener('mouseenter', function () { btn.setAttribute('scale', '1.1 1.1 1.1'); });
+                btn.addEventListener('mouseleave', function () { btn.setAttribute('scale', '1 1 1'); });
+                pai.appendChild(btn);
+                return btn;
+            },
+            mostrar: function () { this.visAlvo = 1; },
+            ocultar: function () { this.visAlvo = 0; this.alvo = 0; },   // sair da área recolhe o painel
+            expandir: function () { if (this.visAlvo === 1) this.alvo = 1; },
+            colapsar: function () { this.alvo = 0; },
+
+            // Ponto da superfície em (u,v) ∈ [-0.5,0.5]², com e ∈ [0,1] (0 = plano, 1 = curvo);
+            // "off" desloca ao longo da normal (positivo = para o lado de quem olha).
+            superficie: function (u, v, e, off, out) {
+                var d = this.data, c = Math.cos(this.rotRad), s = Math.sin(this.rotRad);
+                // plano pequeno (this.Wp x this.Hp: 4:3 quando há imagem, maior quando é só texto)
+                var fx = u * this.Wp, fz = off;
+                var Fx = d.px + fx * c + fz * s;
+                var Fy = d.pyPequeno + v * this.Hp;
+                var Fz = d.pz - fx * s + fz * c;
+                // painel curvo (cilindro de eixo vertical no centro da exêdra, face voltada para dentro)
+                var phi = u * this.arcoRad, r = d.raio - off;
+                var lx = r * Math.sin(phi), lz = -r * Math.cos(phi);
+                var cC = Math.cos(this.rotRadC), sC = Math.sin(this.rotRadC);
+                var Cx = lx * cC + lz * sC;
+                var Cy = d.centroYCurva + v * d.alturaCurva;
+                var Cz = -lx * sC + lz * cC;
+                out[0] = Fx + (Cx - Fx) * e; out[1] = Fy + (Cy - Fy) * e; out[2] = Fz + (Cz - Fz) * e;
+            },
+            atualizarMalha: function (malha, margem, off, e) {
+                var pos = malha.geometry.attributes.position, p = this.tmp;
+                for (var i = 0; i <= this.SEG; i++) {
+                    var u = (-0.5 + i / this.SEG) * margem;
+                    this.superficie(u, 0.5 * margem, e, off, p);  pos.setXYZ(i * 2 + 1, p[0], p[1], p[2]);
+                    this.superficie(u, -0.5 * margem, e, off, p); pos.setXYZ(i * 2, p[0], p[1], p[2]);
+                }
+                pos.needsUpdate = true;
+            },
+            tick: function (time, dt) {
+                var passo = dt / this.data.duracao, mudou = false;
+                if (this.t !== this.alvo) {
+                    this.t = this.t < this.alvo ? Math.min(this.t + passo, this.alvo) : Math.max(this.t - passo, this.alvo);
+                    mudou = true;
+                }
+                if (this.vis !== this.visAlvo) {
+                    var pv = dt / 220;
+                    this.vis = this.vis < this.visAlvo ? Math.min(this.vis + pv, 1) : Math.max(this.vis - pv, 0);
+                    mudou = true;
+                }
+                if (!mudou) return;
+
+                var e = this.t * this.t * (3 - 2 * this.t);
+                this.grupoMalha.visible = this.vis > 0.001;
+                if (this.grupoMalha.visible) {
+                    this.atualizarMalha(this.mMoldura, 1.04, -0.02, e);
+                    this.atualizarMalha(this.mFundo, 1.0, 0.0, e);
+                    if (this.mImgPeq) this.atualizarMalha(this.mImgPeq, 1.0, 0.02, e);   // acompanha o painel enquanto some
+                    if (this.mImg) this.atualizarMalha(this.mImg, 1.0, 0.02, e);
+                    var fi = Math.min(Math.max((this.t - 0.45) / 0.4, 0), 1);
+                    var fo = Math.min(Math.max(this.t / 0.35, 0), 1);                   // fade-out da placa frontal (0 = pequena, 1 = sumiu)
+                    this.mMoldura.material.opacity = 0.85 * this.vis;
+                    this.mFundo.material.opacity = 0.95 * this.vis;
+                    if (this.mImgPeq) this.mImgPeq.material.opacity = (1 - fo * fo * (3 - 2 * fo)) * this.vis;   // antes estava invertido
+                    if (this.mImg) this.mImg.material.opacity = fi * fi * (3 - 2 * fi) * this.vis;
+                }
+                // conteúdos de texto/botões não "dobram": aparecem só nos extremos
+                var pequenoVisivel = this.vis > 0.95 && this.t < 0.02;
+                var grandeVisivel = this.vis > 0.95 && this.t > 0.995;
+                this.grpPeq.object3D.visible = pequenoVisivel;
+                this.grpGrande.object3D.visible = grandeVisivel;
+                this.grpTexto.object3D.visible = grandeVisivel && this.textoCurvoAtivo;
+            },
+            remove: function () { this.el.removeObject3D('painel-malha'); }
+        });
+
+        // ==========================================
+        // MOTOR DO ESCAPE ROOM
+        // ==========================================
+        AFRAME.registerComponent('gerador-de-salas', {
+            init: function () {
+                var self = this;
+                var centro = this.el;
+                
+                this.corApagada = '#222233'; 
+                this.corCoroa = '#ffee00';
+                this.lightsOutState = new Array(10).fill(false);
+                this.terminalStep = 0; 
+                this.senhas = ["1", "2", "3", "4"];
+                this.inputAtual = "";
+
+                this.enigmas = [
+                    "ENIGMA 1:\nQUAL O CÓDIGO DA GERAÇÃO DO\nPRIMEIRO VIDEOGAME DO MUNDO?",
+                    "ENIGMA 2:\nQUAL O CÓDIGO DA GERAÇÃO QUE POPULARIZOU\nOS JOGOS EDUCATIVOS NO BRASIL?",
+                    "ENIGMA 3:\nQUAL O CÓDIGO DA GERAÇÃO COM\nJOGOS REFERÊNCIA COMO MARIO BROS?",
+                    "ENIGMA 4:\nQUAL O CÓDIGO DA GERAÇÃO COM\nO RÁPIDO PROCESSADOR DO MEGA DRIVE?"
+                ];
+                
+                this.aneisCupula = [];
+                this.totensCores = []; 
+
+                var raioRotunda = 20.0;     
+                var alturaImposta = 6.0; 
+                
+                var anguloRad = 18 * (Math.PI / 180);
+                var pX = raioRotunda * Math.sin(anguloRad); 
+                var pZ = -(raioRotunda * Math.cos(anguloRad)); 
+                
+                var alturaTopoArcos = alturaImposta + pX + 0.1; 
+                var raioTuboAro = 0.15;
+                var alturaAro = alturaTopoArcos + raioTuboAro; 
+                
+                // ---- CÚPULA PRINCIPAL COMO CALOTA ESFÉRICA ----
+                // O anel da base (raio = raioRotunda, altura = alturaAro) é fixo. A cúpula deixa de ser
+                // um hemisfério (altura = raio) e passa a ter altura = raioRotunda * fatorAlturaCupula.
+                // Uma calota de base 'a' e altura 'h' pertence a uma esfera de raio R = (a² + h²) / (2h),
+                // com centro em y = alturaAro + h - R e abertura (theta-length) = asin(a / R).
+                // fatorAlturaCupula = 1 reproduz o hemisfério original; 0.5 = metade da altura.
+                var fatorAlturaCupula = 0.75;
+                var alturaCupula = raioRotunda * fatorAlturaCupula;
+                var raioEsfera = (Math.pow(raioRotunda, 2) + Math.pow(alturaCupula, 2)) / (2 * alturaCupula);
+                var centroYEsfera = alturaAro + alturaCupula - raioEsfera;
+                var anguloBaseGraus = Math.asin(raioRotunda / raioEsfera) * 180 / Math.PI;
+
+                // Anel central (óculo): continua no mesmo raio horizontal, agora sobre a nova superfície
+                var raioOculus = raioRotunda * 0.25; 
+                var alturaOculus = centroYEsfera + Math.sqrt(Math.pow(raioEsfera, 2) - Math.pow(raioOculus, 2));
+                var distYOculus = alturaOculus - alturaAro;
+
+                var chaoCentral = document.createElement('a-circle');
+                chaoCentral.setAttribute('position', '0 0 0');
+                chaoCentral.setAttribute('rotation', '-90 18 0'); 
+                chaoCentral.setAttribute('radius', raioRotunda.toFixed(3));
+                chaoCentral.setAttribute('segments', '10');
+                chaoCentral.setAttribute('piso-neon', 'cor: ' + dimCor('#00fff2', BRILHO_FINO) + '; repeat: ' + (raioRotunda * 0.9).toFixed(0) + ' ' + (raioRotunda * 0.9).toFixed(0));
+                centro.appendChild(chaoCentral);
+
+                var cupulaPrincipal = document.createElement('a-sphere');
+                cupulaPrincipal.setAttribute('position', '0 ' + centroYEsfera.toFixed(3) + ' 0');
+                cupulaPrincipal.setAttribute('radius', raioEsfera.toFixed(3));
+                cupulaPrincipal.setAttribute('color', '#05010f');
+                cupulaPrincipal.setAttribute('material', 'side: back; roughness: 1');
+                cupulaPrincipal.setAttribute('theta-length', anguloBaseGraus.toFixed(3));
+                cupulaPrincipal.setAttribute('segments-width', '10');
+                centro.appendChild(cupulaPrincipal);
+
+                var aroHorizontal = document.createElement('a-torus');
+                aroHorizontal.setAttribute('position', '0 ' + alturaAro.toFixed(3) + ' 0');
+                // +0.05 para não coincidir exatamente com a superfície da cúpula (evita
+                // z-fighting na borda inferior, mais visível depois da redução de escala)
+                aroHorizontal.setAttribute('radius', (raioRotunda + 0.05).toFixed(3));
+                aroHorizontal.setAttribute('radius-tubular', raioTuboAro.toString());
+                aroHorizontal.setAttribute('material', 'shader: flat; color: ' + this.corApagada);
+                aroHorizontal.setAttribute('rotation', '90 0 0'); 
+                aroHorizontal.setAttribute('segments-tubular', '10');
+                centro.appendChild(aroHorizontal);
+
+                var distY1 = distYOculus / 3; 
+                var raioAroInt1 = Math.sqrt(Math.pow(raioEsfera, 2) - Math.pow(alturaAro + distY1 - centroYEsfera, 2)); 
+                var alturaAroInt1 = alturaAro + distY1;
+                var aroInt1 = document.createElement('a-torus');
+                aroInt1.setAttribute('position', '0 ' + alturaAroInt1.toFixed(3) + ' 0');
+                aroInt1.setAttribute('radius', raioAroInt1.toFixed(3));
+                aroInt1.setAttribute('radius-tubular', '0.12');
+                aroInt1.setAttribute('material', 'shader: flat; color: ' + this.corApagada);
+                aroInt1.setAttribute('rotation', '90 0 0');
+                aroInt1.setAttribute('segments-tubular', '10');
+                centro.appendChild(aroInt1);
+
+                var distY2 = (distYOculus / 3) * 2; 
+                var raioAroInt2 = Math.sqrt(Math.pow(raioEsfera, 2) - Math.pow(alturaAro + distY2 - centroYEsfera, 2));
+                var alturaAroInt2 = alturaAro + distY2;
+                var aroInt2 = document.createElement('a-torus');
+                aroInt2.setAttribute('position', '0 ' + alturaAroInt2.toFixed(3) + ' 0');
+                aroInt2.setAttribute('radius', raioAroInt2.toFixed(3));
+                aroInt2.setAttribute('radius-tubular', '0.12');
+                aroInt2.setAttribute('material', 'shader: flat; color: ' + this.corApagada);
+                aroInt2.setAttribute('rotation', '90 0 0');
+                aroInt2.setAttribute('segments-tubular', '10');
+                centro.appendChild(aroInt2);
+
+                var anelCentral = document.createElement('a-torus');
+                anelCentral.setAttribute('position', '0 ' + alturaOculus.toFixed(3) + ' 0');
+                anelCentral.setAttribute('radius', raioOculus.toFixed(3));
+                anelCentral.setAttribute('radius-tubular', '0.2');
+                anelCentral.setAttribute('material', 'shader: flat; color: ' + this.corApagada);
+                anelCentral.setAttribute('rotation', '90 0 0');
+                anelCentral.setAttribute('segments-tubular', '10');
+                centro.appendChild(anelCentral);
+
+                this.aneisCupula.push(aroHorizontal);
+                this.aneisCupula.push(aroInt1);
+                this.aneisCupula.push(aroInt2);
+                this.aneisCupula.push(anelCentral);
+
+                for (let i = 0; i < 10; i++) {
+                    var angulo = i * 36; 
+                    var conteudo = conteudosMuseu[i];
+                    var corNeon = dimCor(conteudo.cor, BRILHO_FINO);
+                    var corGrossa = dimCor(conteudo.cor, BRILHO_GROSSO); 
+                    
+                    var ala = document.createElement('a-entity');
+                    ala.setAttribute('rotation', '0 ' + angulo + ' 0');
+                    
+                    var grupoArq = document.createElement('a-entity');
+                    grupoArq.setAttribute('position', '0 0 ' + pZ.toFixed(3));
+                    grupoArq.setAttribute('scale', '0 0 0');
+
+                    var exedraParede = document.createElement('a-cylinder');
+                    exedraParede.setAttribute('position', '0 ' + (alturaImposta/2) + ' 0');
+                    exedraParede.setAttribute('radius', pX.toFixed(3)); 
+                    exedraParede.setAttribute('height', alturaImposta);
+                    exedraParede.setAttribute('theta-start', '90');    
+                    exedraParede.setAttribute('theta-length', '180');  
+                    exedraParede.setAttribute('material', 'side: double; color: #030008; roughness: 0.9');
+                    exedraParede.setAttribute('open-ended', 'true');
+                    grupoArq.appendChild(exedraParede);
+
+                    // Semi-cúpula da exêdra: hemisfério (theta 0..90) cortado ao meio (phi 0..180).
+                    // Com phi positivo a metade nasce no lado +z; o giro de 180° no eixo vertical
+                    // a leva para o lado da parede (-z). side: double para ser visível por dentro.
+                    var exedraCupula = document.createElement('a-sphere');
+                    exedraCupula.setAttribute('position', '0 ' + alturaImposta + ' 0');
+                    exedraCupula.setAttribute('radius', pX.toFixed(3));
+                    exedraCupula.setAttribute('theta-start', '0');
+                    exedraCupula.setAttribute('theta-length', '90');
+                    exedraCupula.setAttribute('phi-start', '0');
+                    exedraCupula.setAttribute('phi-length', '180');
+                    exedraCupula.setAttribute('rotation', '0 180 0');
+                    exedraCupula.setAttribute('material', 'color: #05010f; roughness: 0.9; side: double');
+                    grupoArq.appendChild(exedraCupula);
+
+                    // IDENTIFICAÇÃO DA GERAÇÃO: texto flutuante em frente à região da semi-cúpula,
+                    // voltado para o salão (+z), no estilo do rótulo dos botões de teleporte
+                    // (branco com contorno preto). Está dentro de grupoArq: aparece e recolhe
+                    // junto com a exêdra. Posição: logo abaixo da superfície interna da cúpula
+                    // (em z = -3 a cúpula está a ~11,4 de altura; o texto fica em ~8 a ~10).
+                    var tituloGeracao = (i === 9) ? 'TERMINAL' : conteudo.sala.toUpperCase();
+                    var rotuloGeracao = document.createElement('a-entity');
+                    rotuloGeracao.setAttribute('troika-text', 'value: ' + tituloGeracao + '; color: #ffffff; align: center; fontSize: 0.95; maxWidth: 8; outlineWidth: 0.035; outlineColor: #000000');
+                    rotuloGeracao.setAttribute('position', '0 9.3 -3');
+                    grupoArq.appendChild(rotuloGeracao);
+                    if (i !== 9) {
+                        var rotuloAno = document.createElement('a-entity');
+                        rotuloAno.setAttribute('troika-text', 'value: ( ' + conteudo.ano + ' ); color: ' + corNeon + '; align: center; fontSize: 0.55; maxWidth: 8; outlineWidth: 0.025; outlineColor: #000000');
+                        rotuloAno.setAttribute('position', '0 8.25 -3');
+                        grupoArq.appendChild(rotuloAno);
+                    }
+
+                    var pilarDir = document.createElement('a-cylinder');
+                    pilarDir.setAttribute('position', pX.toFixed(3) + ' ' + (alturaAro / 2).toFixed(3) + ' 0');
+                    pilarDir.setAttribute('radius', '0.35'); pilarDir.setAttribute('height', alturaAro.toFixed(3));
+                    pilarDir.setAttribute('material', 'shader: flat; color: ' + corGrossa);
+                    grupoArq.appendChild(pilarDir);
+
+                    var baseDir = document.createElement('a-cylinder');
+                    baseDir.setAttribute('position', pX.toFixed(3) + ' 0.5 0');
+                    baseDir.setAttribute('radius', '0.5'); baseDir.setAttribute('height', '1');
+                    baseDir.setAttribute('color', '#0c0c18');
+                    grupoArq.appendChild(baseDir);
+
+                    var arcoEntrada = document.createElement('a-torus');
+                    arcoEntrada.setAttribute('position', '0 ' + alturaImposta + ' 0');
+                    arcoEntrada.setAttribute('radius', pX.toFixed(3)); arcoEntrada.setAttribute('radius-tubular', '0.1');
+                    arcoEntrada.setAttribute('arc', '180'); arcoEntrada.setAttribute('material', 'shader: flat; color: ' + corGrossa);
+                    grupoArq.appendChild(arcoEntrada);
+
+                    var cornija = document.createElement('a-torus');
+                    cornija.setAttribute('position', '0 ' + alturaImposta + ' 0');
+                    cornija.setAttribute('radius', (pX - 0.05).toFixed(3)); cornija.setAttribute('radius-tubular', '0.05');
+                    cornija.setAttribute('arc', '180'); cornija.setAttribute('rotation', '-90 0 0');
+                    cornija.setAttribute('material', 'shader: flat; color: ' + corGrossa);
+                    grupoArq.appendChild(cornija);
+
+                    var faixaDir = document.createElement('a-cylinder');
+                    faixaDir.setAttribute('position', pX.toFixed(3) + ' ' + (alturaAro / 2).toFixed(3) + ' 0.05');
+                    faixaDir.setAttribute('radius', '0.1'); faixaDir.setAttribute('height', alturaAro.toFixed(3));
+                    faixaDir.setAttribute('material', 'shader: flat; color: ' + corGrossa);
+                    grupoArq.appendChild(faixaDir);
+
+                    // Nervura = arco de círculo máximo da esfera da cúpula, entre a elevação do anel da
+                    // base (90 - anguloBaseGraus) e a do anel central (acos(raioOculus / raioEsfera)).
+                    var elevBaseGraus = 90 - anguloBaseGraus;
+                    var elevOculusGraus = Math.acos(raioOculus / raioEsfera) * 180 / Math.PI;
+                    var arcoGrausNervura = elevOculusGraus - elevBaseGraus; 
+
+                    var arcoNervura = document.createElement('a-torus');
+                    arcoNervura.setAttribute('position', '0 ' + centroYEsfera.toFixed(3) + ' ' + (-pZ).toFixed(3)); 
+                    arcoNervura.setAttribute('radius', raioEsfera.toFixed(3)); 
+                    arcoNervura.setAttribute('radius-tubular', '0.06'); 
+                    arcoNervura.setAttribute('arc', arcoGrausNervura.toFixed(2)); 
+                    arcoNervura.setAttribute('rotation', '0 72 ' + elevBaseGraus.toFixed(3)); // roll = onde o arco começa
+                    arcoNervura.setAttribute('material', 'shader: flat; color: ' + corGrossa);
+                    arcoNervura.setAttribute('segments-tubular', '42');
+                    grupoArq.appendChild(arcoNervura);
+                    ala.appendChild(grupoArq);
+
+                    var exedraChao = document.createElement('a-circle');
+                    exedraChao.setAttribute('position', '0 0.105 ' + pZ);
+                    exedraChao.setAttribute('radius', pX.toFixed(3));
+                    exedraChao.setAttribute('rotation', '-90 0 0');
+                    exedraChao.setAttribute('piso-neon', 'cor: ' + this.corApagada + '; repeat: 4 4');
+                    ala.appendChild(exedraChao);
+
+                    var raioPlataforma = pX; 
+                    var alturaPlataforma = 0.1; 
+                    
+                    var plataformaChao = document.createElement('a-cylinder');
+                    plataformaChao.setAttribute('position', '0 ' + (alturaPlataforma / 2).toFixed(3) + ' ' + pZ);
+                    plataformaChao.setAttribute('radius', raioPlataforma.toFixed(3));
+                    plataformaChao.setAttribute('height', alturaPlataforma.toFixed(3));
+                    plataformaChao.setAttribute('material', 'color: #0c0c18; roughness: 0.8');
+                    ala.appendChild(plataformaChao);
+
+                    var bordaPlataforma = document.createElement('a-torus');
+                    bordaPlataforma.setAttribute('position', '0 ' + alturaPlataforma.toFixed(3) + ' ' + pZ);
+                    bordaPlataforma.setAttribute('radius', raioPlataforma.toFixed(3));
+                    bordaPlataforma.setAttribute('radius-tubular', '0.03');
+                    bordaPlataforma.setAttribute('rotation', '90 0 0');
+                    bordaPlataforma.setAttribute('material', 'shader: flat; color: ' + this.corApagada);
+                    ala.appendChild(bordaPlataforma);
+
+                    var listraNeon = document.createElement('a-cylinder');
+                    listraNeon.setAttribute('position', '0 1 ' + pZ);
+                    listraNeon.setAttribute('radius', (pX - 0.01).toFixed(3));
+                    listraNeon.setAttribute('height', '0.04');
+                    listraNeon.setAttribute('theta-start', '90'); listraNeon.setAttribute('theta-length', '180');
+                    listraNeon.setAttribute('material', 'shader: flat; color: ' + this.corApagada + '; side: double');
+                    listraNeon.setAttribute('open-ended', 'true');
+                    ala.appendChild(listraNeon);
+
+                    var zBordaMonumento = -(raioRotunda * 0.16); 
+                    var zTotem = zBordaMonumento - 0.3; 
+                    
+                    var totemBotao = document.createElement('a-entity');
+                    totemBotao.setAttribute('position', '0 0 ' + zTotem.toFixed(3));
+                    totemBotao.setAttribute('rotation', '0 180 0'); 
+                    
+                    var baseTotem = document.createElement('a-cylinder');
+                    baseTotem.setAttribute('radius', '0.3'); baseTotem.setAttribute('height', '0.08'); baseTotem.setAttribute('position', '0 0.04 0'); baseTotem.setAttribute('color', '#080810');
+                    totemBotao.appendChild(baseTotem);
+                    
+                    var anelBaseTotem = document.createElement('a-torus');
+                    anelBaseTotem.setAttribute('radius', '0.3'); anelBaseTotem.setAttribute('radius-tubular', '0.01'); anelBaseTotem.setAttribute('position', '0 0.08 0'); anelBaseTotem.setAttribute('rotation', '90 0 0'); 
+                    anelBaseTotem.setAttribute('material', 'shader: flat; color: ' + this.corApagada);
+                    totemBotao.appendChild(anelBaseTotem);
+                    
+                    var corpoTotem = document.createElement('a-cylinder');
+                    corpoTotem.setAttribute('radius', '0.22'); corpoTotem.setAttribute('height', '1.1'); corpoTotem.setAttribute('position', '0 0.63 0'); corpoTotem.setAttribute('color', '#12121f');
+                    totemBotao.appendChild(corpoTotem);
+
+                    var faixaTotem = document.createElement('a-plane');
+                    faixaTotem.setAttribute('width', '0.05'); faixaTotem.setAttribute('height', '0.9'); faixaTotem.setAttribute('position', '0 0.63 0.221'); 
+                    faixaTotem.setAttribute('material', 'shader: flat; color: ' + this.corApagada);
+                    totemBotao.appendChild(faixaTotem);
+
+                    var cabecaTotem = document.createElement('a-entity');
+                    cabecaTotem.setAttribute('position', '0 1.18 0'); cabecaTotem.setAttribute('rotation', '-20 180 0'); 
+                    
+                    var cilindroCabeca = document.createElement('a-cylinder');
+                    cilindroCabeca.setAttribute('radius', '0.22'); cilindroCabeca.setAttribute('height', '0.15'); cilindroCabeca.setAttribute('color', '#0c0c18');
+                    cabecaTotem.appendChild(cilindroCabeca);
+
+                    var aroBotao = document.createElement('a-torus');
+                    aroBotao.setAttribute('radius', '0.22'); aroBotao.setAttribute('radius-tubular', '0.015'); aroBotao.setAttribute('position', '0 0.075 0'); aroBotao.setAttribute('rotation', '90 0 0');
+                    aroBotao.setAttribute('material', 'shader: flat; color: #333');
+                    aroBotao.setAttribute('animation__pulse', 'property: material.color; from: #111; to: ' + corNeon + '; dir: alternate; loop: true; dur: 1200; easing: easeInOutSine');
+                    cabecaTotem.appendChild(aroBotao);
+
+                    var botaoFisico = document.createElement('a-cylinder');
+                    botaoFisico.classList.add('interactable'); 
+                    botaoFisico.setAttribute('radius', '0.16'); botaoFisico.setAttribute('height', '0.06'); botaoFisico.setAttribute('position', '0 0.08 0');
+                    botaoFisico.setAttribute('material', 'shader: flat; color: ' + this.corApagada);
+                    
+                    botaoFisico.addEventListener('click', (function(idx) {
+                        return function() { self.processarLightsOut(idx); };
+                    })(i));
+
+                    cabecaTotem.appendChild(botaoFisico);
+                    totemBotao.appendChild(cabecaTotem);
+                    ala.appendChild(totemBotao);
+
+                    var rotuloTp = document.createElement('a-entity');
+                    var textoTp = (i < 9)
+                        ? 'TELEPORTAR PARA\nSALA DA ' + conteudo.sala.toUpperCase() + '\n( ' + conteudo.ano + ' )'
+                        : 'TELEPORTAR PARA\nO TERMINAL';
+                    rotuloTp.setAttribute('troika-text', 'value: ' + textoTp + '; color: #ffffff; align: center; fontSize: 0.11; maxWidth: 1.8; lineHeight: 1.25; outlineWidth: 0.006; outlineColor: #000000');
+                    rotuloTp.setAttribute('position', '0 1.95 ' + zTotem.toFixed(3));
+                    rotuloTp.setAttribute('rotation', '0 180 0');
+                    rotuloTp.setAttribute('visible', 'false');
+                    ala.appendChild(rotuloTp);
+
+                    var zBordaPlataforma = pZ + raioPlataforma; 
+                    var comprimentoLinha = Math.abs(zBordaPlataforma - zTotem);
+                    
+                    var linhaPivot = document.createElement('a-entity');
+                    linhaPivot.setAttribute('position', '0 0.01 ' + zTotem.toFixed(3));
+                    linhaPivot.setAttribute('scale', '1 1 0.001');
+
+                    var linhaCentro = document.createElement('a-plane');
+                    linhaCentro.setAttribute('position', '0 0 ' + (-comprimentoLinha/2).toFixed(3));
+                    linhaCentro.setAttribute('width', '0.25'); 
+                    linhaCentro.setAttribute('height', comprimentoLinha.toFixed(3));
+                    linhaCentro.setAttribute('rotation', '-90 0 0');
+                    linhaCentro.setAttribute('material', 'shader: flat; color: ' + corGrossa);
+                    
+                    linhaPivot.appendChild(linhaCentro);
+                    ala.appendChild(linhaPivot);
+
+                    var grupoCont = document.createElement('a-entity');
+                    grupoCont.setAttribute('position', '0 0 ' + pZ.toFixed(3));
+                    // O terminal (i = 9) fica sempre visível durante o escape room; os demais
+                    // grupos de conteúdo só aparecem quando o totem da geração acende.
+                    grupoCont.setAttribute('scale', i === 9 ? '1 1 1' : '0 0 0');
+
+                    if (i < 9) {
+                        var zPedestalLocal = -(raioRotunda * 0.15); 
+                        var expos = [
+                            { d: conteudo.esq, x: -4.0, z: zPedestalLocal, rot: 30, rotCurva: 55 },
+                            { d: conteudo.dir, x: 4.0, z: zPedestalLocal, rot: -30, rotCurva: -55 }
+                        ];
+
+                        expos.forEach(function (ex) {
+                            var ped = document.createElement('a-entity');
+                            ped.setAttribute('position', ex.x + ' 0.1 ' + ex.z);
+                            ped.setAttribute('rotation', '0 ' + ex.rot + ' 0');
+                            
+                            var base = document.createElement('a-box'); base.setAttribute('position', '0 0.6 0'); base.setAttribute('width', '1.0'); base.setAttribute('height', '1.2'); base.setAttribute('depth', '1.0'); base.setAttribute('color', '#12121f'); ped.appendChild(base);
+                            var topo = document.createElement('a-box'); topo.setAttribute('position', '0 1.22 0'); topo.setAttribute('width', '1.05'); topo.setAttribute('height', '0.06'); topo.setAttribute('depth', '1.05'); topo.setAttribute('material', 'shader: flat; color: ' + corNeon); ped.appendChild(topo);
+                            var raioEsq = document.createElement('a-circle'); raioEsq.setAttribute('position', '0 0.02 2'); raioEsq.setAttribute('radius', '2.5'); raioEsq.setAttribute('scale', '1 1.5 1'); raioEsq.setAttribute('rotation', '-90 0 0'); raioEsq.setAttribute('material', 'shader: flat; color: #00fff2; opacity: 0.12; transparent: true'); ped.appendChild(raioEsq);
+
+                            // Modelo 3D do console, quando existir (ex.d.modelo). O pedestal (base
+                            // + topo) termina em y=1.25; o modelo é apoiado logo acima disso.
+                            // ESCALA_MODELO_CONSOLE é um valor estimado (o glTF não traz unidades
+                            // reais) — ajuste-o aqui depois de ver o resultado no navegador/HMD.
+                            if (ex.d.modelo) {
+                                var ESCALA_MODELO_CONSOLE = 1.5 ;
+                                var console3d = document.createElement('a-entity');
+                                console3d.setAttribute('gltf-model', ex.d.modelo);
+                                console3d.setAttribute('position', '0 1.3 0');
+                                console3d.setAttribute('scale', ESCALA_MODELO_CONSOLE + ' ' + ESCALA_MODELO_CONSOLE + ' ' + ESCALA_MODELO_CONSOLE);
+                                // Diagnóstico: confirma no console do navegador (F12) se o modelo
+                                // carregou. Lembrete: ele só aparece quando a sala é revelada —
+                                // "Visitar Exposição" no HUD, ou resolvendo as 4 senhas do terminal.
+                                console3d.addEventListener('model-loaded', function () {
+                                    console.log('[museu-vr] modelo 3D carregado:', ex.d.titulo);
+                                });
+                                console3d.addEventListener('model-error', function (ev) {
+                                    console.error('[museu-vr] falha ao carregar o modelo 3D de ' + ex.d.titulo + ':', ev.detail && ev.detail.src);
+                                });
+                                ped.appendChild(console3d);
+                            }
+                            
+                            // ==========================================
+                            // PLACA DE IDENTIFICAÇÃO FIXA (não reativa): inclinada 45° na borda do pedestal,
+                            // com o nome do console. O topo da placa encosta na borda superior frontal do
+                            // pedestal (y=1.25, z=0.525) e ela desce para a frente, inclinada 45°, com a
+                            // face voltada para cima e para o visitante (+z do pedestal).
+                            // ==========================================
+                            var compPlaca = 1.0, altPlaca = 0.36;                      // largura x comprimento na inclinação
+                            var yCentroPlaca = 1.25 - (altPlaca / 2) * Math.SQRT1_2;   // centro: topo menos meia altura projetada
+                            var zCentroPlaca = 0.525 + (altPlaca / 2) * Math.SQRT1_2;
+                            var placaNome = document.createElement('a-entity');
+                            placaNome.setAttribute('position', '0 ' + yCentroPlaca.toFixed(3) + ' ' + zCentroPlaca.toFixed(3));
+                            placaNome.setAttribute('rotation', '-45 0 0');
+                            var placaBorda = document.createElement('a-plane');
+                            placaBorda.setAttribute('width', (compPlaca + 0.04).toFixed(3)); placaBorda.setAttribute('height', (altPlaca + 0.04).toFixed(3));
+                            placaBorda.setAttribute('position', '0 0 -0.004'); placaBorda.setAttribute('material', 'shader: flat; color: ' + corNeon + '; side: double');
+                            placaNome.appendChild(placaBorda);
+                            var placaFundo = document.createElement('a-plane');
+                            placaFundo.setAttribute('width', compPlaca.toFixed(3)); placaFundo.setAttribute('height', altPlaca.toFixed(3));
+                            placaFundo.setAttribute('material', 'shader: flat; color: #06060f; side: double');
+                            placaNome.appendChild(placaFundo);
+                            var placaTexto = document.createElement('a-entity');
+                            placaTexto.setAttribute('troika-text', {
+                                value: ex.d.titulo + (ex.d.anos ? '\n' + ex.d.anos : ''), color: '#ffffff', fontSize: 0.065,
+                                maxWidth: compPlaca - 0.1, align: 'center', anchor: 'center', baseline: 'middle', lineHeight: 1.2
+                            });
+                            placaTexto.setAttribute('position', '0 0 0.006');
+                            placaNome.appendChild(placaTexto);
+                            ped.appendChild(placaNome);
+
+                            // ==========================================
+                            // PAINEL EXPANSIVEL (placa pequena <-> tela curva 16:9, mesmo elemento)
+                            // Pequeno: ao lado do pedestal (y=2.9 no espaço do grupo).
+                            // Curvo: na parede da exêdra, centrado em y=3.2, girado como o pedestal.
+                            // A imagem (ex.d.imagem) é a placa 16:9 pronta; sem ela, usa placeholder.
+                            // ==========================================
+                            var painelEl = document.createElement('a-entity');
+                            painelEl.setAttribute('painel-expansivel', {
+                                cor: corNeon,
+                                imagemPequena: ex.d.imagemPequena || '',   //Adicionada imagem pequena
+                                imagem: ex.d.imagem || '',
+                                titulo: ex.d.titulo,
+                                anos: ex.d.anos || '',
+                                fabricante: ex.d.fabricante || '',
+                                geracao: ex.d.geracao || '',
+                                ficha: ex.d.ficha || '',
+                                texto: ex.d.texto,
+                                tituloCurva: (ex.d.curva && ex.d.curva.titulo) || '',
+                                textoCurva: (ex.d.curva && ex.d.curva.texto) || '',
+                                rot: ex.rot,              // giro do pedestal e da placa pequena
+                                rotCurva: ex.rotCurva,    // giro da tela curva (posição ao longo da parede)
+                                px: ex.x, pz: ex.z, pyPequeno: 3.3,
+                                raio: pX - 0.15
+                            });
+                            grupoCont.appendChild(painelEl);
+                            ped.painelRef = painelEl; // o trigger de proximidade controla este painel
+
+                            ped.setAttribute('painel-proximidade', ''); 
+                            grupoCont.appendChild(ped);
+                        });
+
+                        var totemArcade = document.createElement('a-entity');
+                        var zArcadeLocal = -(raioRotunda * 0.255);
+                        totemArcade.setAttribute('position', '0 0.1 ' + zArcadeLocal.toFixed(3)); 
+                        totemArcade.setAttribute('scale', '0.85 0.85 0.85');
+                        
+                        var pernaEsq = document.createElement('a-box'); pernaEsq.setAttribute('position', '-1.45 2.4 0.4'); pernaEsq.setAttribute('width', '0.1'); pernaEsq.setAttribute('height', '4.8'); pernaEsq.setAttribute('depth', '1.2'); pernaEsq.setAttribute('color', '#080810'); totemArcade.appendChild(pernaEsq);
+                        var pernaDir = document.createElement('a-box'); pernaDir.setAttribute('position', '1.45 2.4 0.4'); pernaDir.setAttribute('width', '0.1'); pernaDir.setAttribute('height', '4.8'); pernaDir.setAttribute('depth', '1.2'); pernaDir.setAttribute('color', '#080810'); totemArcade.appendChild(pernaDir);
+
+                        var painelMeio = document.createElement('a-plane'); painelMeio.setAttribute('position', '0 3.0 0.2'); painelMeio.setAttribute('width', '2.8'); painelMeio.setAttribute('height', '2.1'); painelMeio.setAttribute('material', 'shader: flat; color: #1a1a33');
+                        var areaVideo = document.createElement('a-plane'); areaVideo.setAttribute('position', '0 0.35 0.01'); areaVideo.setAttribute('width', '2.4'); areaVideo.setAttribute('height', '1.35'); areaVideo.setAttribute('color', '#000000'); painelMeio.appendChild(areaVideo);
+                        var textoVideo = document.createElement('a-entity'); textoVideo.setAttribute('troika-text', 'value: [ ESPAÇO PARA VÍDEO ]; color: #444444; align: center; fontSize: 0.15'); textoVideo.setAttribute('position', '0 0 0.02'); areaVideo.appendChild(textoVideo);
+                        var textoMeio = document.createElement('a-entity'); textoMeio.setAttribute('troika-text', 'value: Resumo histórico e principais inovações da ' + conteudo.sala + '...\n(Texto dinâmico do carrossel); color: #00fff2; align: center; fontSize: 0.1; maxWidth: 2.5; lineHeight: 1.2'); textoMeio.setAttribute('position', '0 -0.6 0.01'); painelMeio.appendChild(textoMeio); totemArcade.appendChild(painelMeio);
+
+                        var painelCima = document.createElement('a-plane'); painelCima.setAttribute('position', '0 4.396 0.4'); painelCima.setAttribute('rotation', '30 0 0'); painelCima.setAttribute('width', '2.8'); painelCima.setAttribute('height', '0.8'); painelCima.setAttribute('material', 'shader: flat; color: ' + corNeon); 
+                        var textoCima = document.createElement('a-entity'); textoCima.setAttribute('troika-text', 'value: ' + conteudo.sala.toUpperCase() + '\n( ' + conteudo.ano + ' ); color: #05010f; align: center; fontSize: 0.22; maxWidth: 2.6'); textoCima.setAttribute('position', '0 0 0.01'); painelCima.appendChild(textoCima); totemArcade.appendChild(painelCima);
+
+                        var painelBaixo = document.createElement('a-plane'); painelBaixo.setAttribute('position', '0 1.596 0.554'); painelBaixo.setAttribute('rotation', '-45 0 0'); painelBaixo.setAttribute('width', '2.8'); painelBaixo.setAttribute('height', '1.0'); painelBaixo.setAttribute('color', '#080810'); 
+                        var detalheMesa = document.createElement('a-plane'); detalheMesa.setAttribute('position', '0 0 0.01'); detalheMesa.setAttribute('width', '2.7'); detalheMesa.setAttribute('height', '0.9'); detalheMesa.setAttribute('material', 'shader: flat; color: ' + corNeon); painelBaixo.appendChild(detalheMesa);
+                        var fundoMesa = document.createElement('a-plane'); fundoMesa.setAttribute('position', '0 0 0.02'); fundoMesa.setAttribute('width', '2.6'); fundoMesa.setAttribute('height', '0.8'); fundoMesa.setAttribute('color', '#05010f'); painelBaixo.appendChild(fundoMesa);
+
+                        var btnPrev = document.createElement('a-circle'); btnPrev.setAttribute('position', '-0.6 0 0.03'); btnPrev.setAttribute('radius', '0.15'); btnPrev.setAttribute('color', '#0a0a15');
+                        var ringPrev = document.createElement('a-ring'); ringPrev.setAttribute('radius-inner', '0.13'); ringPrev.setAttribute('radius-outer', '0.15'); ringPrev.setAttribute('position', '0 0 0.01'); ringPrev.setAttribute('material', 'shader: flat; color: ' + corNeon); btnPrev.appendChild(ringPrev);
+                        var iconPrev = document.createElement('a-triangle'); iconPrev.setAttribute('vertex-a', '0 0.07 0'); iconPrev.setAttribute('vertex-b', '-0.07 -0.07 0'); iconPrev.setAttribute('vertex-c', '0.07 -0.07 0'); iconPrev.setAttribute('rotation', '0 0 90'); iconPrev.setAttribute('position', '-0.02 0 0.02'); iconPrev.setAttribute('material', 'shader: flat; color: ' + corNeon); btnPrev.appendChild(iconPrev);
+                        var barPrev = document.createElement('a-plane'); barPrev.setAttribute('width', '0.04'); barPrev.setAttribute('height', '0.14'); barPrev.setAttribute('position', '-0.08 0 0.02'); barPrev.setAttribute('material', 'shader: flat; color: ' + corNeon); btnPrev.appendChild(barPrev); painelBaixo.appendChild(btnPrev);
+
+                        var btnPlay = document.createElement('a-circle'); btnPlay.setAttribute('position', '0 0 0.03'); btnPlay.setAttribute('radius', '0.15'); btnPlay.setAttribute('color', '#0a0a15');
+                        var ringPlay = document.createElement('a-ring'); ringPlay.setAttribute('radius-inner', '0.13'); ringPlay.setAttribute('radius-outer', '0.15'); ringPlay.setAttribute('position', '0 0 0.01'); ringPlay.setAttribute('material', 'shader: flat; color: ' + corNeon); btnPlay.appendChild(ringPlay);
+                        var iconPlay = document.createElement('a-triangle'); iconPlay.setAttribute('vertex-a', '0 0.07 0'); iconPlay.setAttribute('vertex-b', '-0.07 -0.07 0'); iconPlay.setAttribute('vertex-c', '0.07 -0.07 0'); iconPlay.setAttribute('rotation', '0 0 -90'); iconPlay.setAttribute('position', '0.02 0 0.02'); iconPlay.setAttribute('material', 'shader: flat; color: ' + corNeon); btnPlay.appendChild(iconPlay); painelBaixo.appendChild(btnPlay);
+
+                        var btnNext = document.createElement('a-circle'); btnNext.setAttribute('position', '0.6 0 0.03'); btnNext.setAttribute('radius', '0.15'); btnNext.setAttribute('color', '#0a0a15');
+                        var ringNext = document.createElement('a-ring'); ringNext.setAttribute('radius-inner', '0.13'); ringNext.setAttribute('radius-outer', '0.15'); ringNext.setAttribute('position', '0 0 0.01'); ringNext.setAttribute('material', 'shader: flat; color: ' + corNeon); btnNext.appendChild(ringNext);
+                        var iconNext = document.createElement('a-triangle'); iconNext.setAttribute('vertex-a', '0 0.07 0'); iconNext.setAttribute('vertex-b', '-0.07 -0.07 0'); iconNext.setAttribute('vertex-c', '0.07 -0.07 0'); iconNext.setAttribute('rotation', '0 0 -90'); iconNext.setAttribute('position', '0.02 0 0.02'); iconNext.setAttribute('material', 'shader: flat; color: ' + corNeon); btnNext.appendChild(iconNext);
+                        var barNext = document.createElement('a-plane'); barNext.setAttribute('width', '0.04'); barNext.setAttribute('height', '0.14'); barNext.setAttribute('position', '0.08 0 0.02'); barNext.setAttribute('material', 'shader: flat; color: ' + corNeon); btnNext.appendChild(barNext); painelBaixo.appendChild(btnNext);
+                        
+                        totemArcade.appendChild(painelBaixo);
+                        grupoCont.appendChild(totemArcade);
+                    } else {
+                        this.construirTerminalCentral(grupoCont);
+                    }
+
+                    ala.appendChild(grupoCont);
+
+                    // Exêdra do terminal (i = 9): piso, borda da plataforma e listra da parede
+                    // ficam sempre acesos, mesmo com o puzzle apagado.
+                    if (i === 9) {
+                        exedraChao.setAttribute('piso-neon', 'cor', corNeon);
+                        bordaPlataforma.setAttribute('material', 'color', corNeon);
+                        listraNeon.setAttribute('material', 'color', corNeon);
+                    }
+
+                    this.totensCores.push({ 
+                        anelBase: anelBaseTotem, faixa: faixaTotem, btn: botaoFisico, aroBotao: aroBotao,
+                        pisoCirc: exedraChao, bordaPlat: bordaPlataforma, listra: listraNeon,
+                        linhaPivot: linhaPivot,
+                        arqEntity: grupoArq, conteudoEntity: grupoCont, rotulo: rotuloTp, 
+                        corOriginal: corNeon, timerID: null 
+                    });
+
+                    centro.appendChild(ala);
+                }
+
+                this.atualizarPulsos();
+
+                // Pergunta 1 no jumbotron desde o início (ligada às senhas, não ao totem 9)
+                var sceneEl = this.el.sceneEl;
+                if (sceneEl.hasLoaded) this.atualizarJumbotron();
+                else sceneEl.addEventListener('loaded', function () { self.atualizarJumbotron(); });
+            },
+
+            construirTerminalCentral: function(containerLocal) {
+                var self = this;
+                
+                var estante = document.createElement('a-entity');
+                // +1.8: mesma distância do centro da exêdra de antes (era -1.8, lado da parede),
+                // agora entre o centro da exêdra e o centro do salão.
+                estante.setAttribute('position', '0 0.1 1.8'); 
+                estante.setAttribute('rotation', '0 180 0'); 
+                
+                var pilar = document.createElement('a-cylinder');
+                pilar.setAttribute('position', '0 0.7 0'); 
+                pilar.setAttribute('radius', '0.3'); 
+                pilar.setAttribute('height', '1.4'); 
+                pilar.setAttribute('color', '#0c0c18');
+                estante.appendChild(pilar);
+                
+                var anel = document.createElement('a-torus');
+                anel.setAttribute('position', '0 1.3 0'); 
+                anel.setAttribute('rotation', '90 0 0'); 
+                anel.setAttribute('radius', '0.3'); 
+                anel.setAttribute('radius-tubular', '0.02'); 
+                anel.setAttribute('material', 'shader: flat; color: #00fff2');
+                estante.appendChild(anel);
+
+                var painelTerm = document.createElement('a-entity');
+                painelTerm.setAttribute('position', '0 2.05 0.1'); 
+                painelTerm.setAttribute('rotation', '-20 0 0'); 
+                
+                var fundo = document.createElement('a-cylinder');
+                fundo.setAttribute('radius', '0.65');
+                fundo.setAttribute('height', '0.1');
+                fundo.setAttribute('rotation', '90 0 0');
+                fundo.setAttribute('position', '0 0 -0.05');
+                fundo.setAttribute('color', '#12121f');
+                painelTerm.appendChild(fundo);
+
+                var molduraNeon = document.createElement('a-torus');
+                molduraNeon.setAttribute('radius', '0.65');
+                molduraNeon.setAttribute('radius-tubular', '0.0075');
+                molduraNeon.setAttribute('rotation', '0 0 0');
+                molduraNeon.setAttribute('position', '0 0 -0.049');
+                molduraNeon.setAttribute('material', 'shader: flat; color: #00fff2');
+                painelTerm.appendChild(molduraNeon);
+
+                var display = document.createElement('a-plane');
+                display.setAttribute('position', '0 0.35 0.01'); 
+                display.setAttribute('width', '0.6'); 
+                display.setAttribute('height', '0.18'); 
+                display.setAttribute('color', '#000000');
+                
+                this.textoDisplay = document.createElement('a-entity');
+                this.textoDisplay.setAttribute('troika-text', 'value: SENHA ' + (this.terminalStep + 1) + ':\n_ _ _; color: #00fff2; align: center; fontSize: 0.055');
+                this.textoDisplay.setAttribute('position', '0 0 0.01');
+                display.appendChild(this.textoDisplay);
+                painelTerm.appendChild(display);
+
+                var botoesInfo = [
+                    { t: '1', x: -0.15, y: 0.10 }, { t: '2', x: 0, y: 0.10 }, { t: '3', x: 0.15, y: 0.10 },
+                    { t: '4', x: -0.15, y: -0.05 }, { t: '5', x: 0, y: -0.05 }, { t: '6', x: 0.15, y: -0.05 },
+                    { t: '7', x: -0.15, y: -0.20 }, { t: '8', x: 0, y: -0.20 }, { t: '9', x: 0.15, y: -0.20 },
+                    { t: 'C', x: -0.15, y: -0.35, c: '#ff2d55' }, { t: '0', x: 0, y: -0.35 }, { t: 'V', x: 0.15, y: -0.35, c: '#39ff14' }
+                ];
+
+                botoesInfo.forEach(function(b) {
+                    var btnBox = document.createElement('a-box');
+                    btnBox.setAttribute('position', b.x + ' ' + b.y + ' 0.01'); 
+                    btnBox.setAttribute('width', '0.1'); 
+                    btnBox.setAttribute('height', '0.1'); 
+                    btnBox.setAttribute('depth', '0.02'); 
+                    btnBox.setAttribute('color', '#12121f');
+                    btnBox.classList.add('interactable'); 
+
+                    var textBtn = document.createElement('a-entity');
+                    var corT = b.c ? b.c : '#ffffff';
+                    textBtn.setAttribute('troika-text', 'value: ' + b.t + '; color: ' + corT + '; align: center; fontSize: 0.06');
+                    textBtn.setAttribute('position', '0 0 0.015'); 
+                    btnBox.appendChild(textBtn);
+
+                    btnBox.addEventListener('click', function() { self.cliqueTerminal(b.t); });
+                    painelTerm.appendChild(btnBox);
+                });
+
+                estante.appendChild(painelTerm);
+                containerLocal.appendChild(estante);
+            },
+
+            atualizarPulsos: function() {
+                var ativas = this.lightsOutState.filter(function(s) { return s; }).length;
+                var autoStart = (ativas === 0);
+                
+                this.totensCores.forEach(function(props) {
+                    if (autoStart) {
+                        props.aroBotao.setAttribute('animation__pulse', 'enabled', 'true');
+                    } else {
+                        props.aroBotao.setAttribute('animation__pulse', 'enabled', 'false');
+                        props.aroBotao.setAttribute('material', 'color', '#333');
+                    }
+                });
+            },
+
+            processarLightsOut: function(indexApertado) {
+                if (window.menuInicialAberto) return; // menu aberto: ambiente oculto, ignora cliques
+                if (this.terminalStep >= 4) {
+                    var wp = PONTOS_TELEPORTE[indexApertado].sala;
+                    var iAla = indexApertado;
+                    teleportarComBlink(wp.x * window.ESCALA_MUNDO, 0, wp.z * window.ESCALA_MUNDO, wp.rot, function () {
+                        if (iAla < 9) mostrarSala(iAla); else esconderSalas();
+                    });
+                    return;
+                }
+
+                var esq = (indexApertado - 1 + 10) % 10;
+                var dir = (indexApertado + 1) % 10;
+                
+                this.inverterEstado(esq);
+                this.inverterEstado(indexApertado);
+                this.inverterEstado(dir);
+
+                this.atualizarPulsos();
+            },
+
+            inverterEstado: function(idx) {
+                this.lightsOutState[idx] = !this.lightsOutState[idx];
+                this.aplicarEstadoVisual(idx, this.lightsOutState[idx]);
+            },
+
+            aplicarEstadoVisual: function(idx, ligado) {
+                var props = this.totensCores[idx];
+                var self = this;
+                var acessoTotal = this.terminalStep >= 4;
+                if (props.rotulo) props.rotulo.setAttribute('visible', acessoTotal);
+
+                // (O jumbotron não depende mais do totem 9: ver atualizarJumbotron(), ligado às senhas.)
+
+                if (props.timerID) clearTimeout(props.timerID);
+
+                if(ligado) {
+                    props.anelBase.setAttribute('material', 'color', props.corOriginal);
+                    props.faixa.setAttribute('material', 'color', props.corOriginal);
+                    props.btn.setAttribute('material', 'color', props.corOriginal);
+                    
+                    props.linhaPivot.setAttribute('animation', 'property: scale; to: 1 1 1; dur: 600; easing: easeOutQuad');
+                    
+                    props.timerID = setTimeout(function() {
+                        props.pisoCirc.setAttribute('piso-neon', 'cor', props.corOriginal); 
+                        props.bordaPlat.setAttribute('material', 'color', props.corOriginal);
+                        props.listra.setAttribute('material', 'color', props.corOriginal);
+
+                        if(acessoTotal) {
+                            props.arqEntity.setAttribute('animation', 'property: scale; to: 1 1 1; dur: 500; easing: easeOutQuad');
+                        }
+                        if(props.conteudoEntity && idx !== 9) {
+                            props.conteudoEntity.setAttribute('animation', 'property: scale; to: 1 1 1; dur: 400; easing: easeOutQuad');
+                        }
+                    }, 600);
+                    
+                } else {
+                    // idx 9 (exêdra do terminal) mantém piso, borda e listra acesos
+                    var corFixa = (idx === 9) ? props.corOriginal : this.corApagada;
+                    props.pisoCirc.setAttribute('piso-neon', 'cor', corFixa); 
+                    props.bordaPlat.setAttribute('material', 'color', corFixa);
+                    props.listra.setAttribute('material', 'color', corFixa);
+
+                    props.arqEntity.setAttribute('animation', 'property: scale; to: 0 0 0; dur: 800; easing: easeInQuad');
+                    if(props.conteudoEntity && idx !== 9) {
+                        props.conteudoEntity.setAttribute('animation', 'property: scale; to: 0 0 0; dur: 400; easing: easeInQuad');
+                    }
+
+                    props.linhaPivot.setAttribute('animation', 'property: scale; to: 1 1 0.001; dur: 600; easing: easeInQuad');
+                    
+                    props.timerID = setTimeout(function() {
+                        props.anelBase.setAttribute('material', 'color', self.corApagada);
+                        props.faixa.setAttribute('material', 'color', self.corApagada);
+                        props.btn.setAttribute('material', 'color', self.corApagada);
+                    }, 600);
+                }
+            },
+
+            cliqueTerminal: function(tecla) {
+                if (window.menuInicialAberto) return;
+                if(this.terminalStep >= 4) {
+                    if(tecla === 'C') this.resetJogo();
+                    if(tecla === 'V' && this.inputAtual === "123") this.ativarModoDev();
+                    if(tecla !== 'C' && tecla !== 'V' && this.inputAtual.length < 5) {
+                        this.inputAtual += tecla;
+                        this.atualizarDisplay();
+                    }
+                    return; 
+                }
+
+                if(tecla === 'C') {
+                    this.inputAtual = "";
+                } else if(tecla === 'V') {
+                    if (this.inputAtual === "123") {
+                        this.ativarModoDev();
+                        return;
+                    }
+
+                    if(this.inputAtual === this.senhas[this.terminalStep]) {
+                        this.aneisCupula[this.terminalStep].setAttribute('material', 'color', this.corCoroa);
+                        this.terminalStep++;
+                        this.inputAtual = "";
+                        
+                        this.atualizarJumbotron(); // próxima pergunta (ou padrão, se acesso total)
+
+                        if(this.terminalStep === 4) {
+                            this.textoDisplay.setAttribute('troika-text', 'value: ACESSO TOTAL!\nSISTEMA ONLINE\n[ C ] P/ REINICIAR; color: #39ff14; align: center; fontSize: 0.045');
+                            this.textoDisplay.setAttribute('position', '0 0 0.01');
+                            
+                            for(var a = 0; a < 10; a++) {
+                                this.lightsOutState[a] = true;
+                                this.aplicarEstadoVisual(a, true);
+                            }
+                            this.atualizarPulsos();
+                        } else {
+                            this.textoDisplay.setAttribute('troika-text', 'value: SENHA ACEITA!\nREINICIANDO...; color: #39ff14; align: center; fontSize: 0.055');
+                            this.textoDisplay.setAttribute('position', '0 0 0.01');
+                            // Recolhe os elementos NA HORA em que a senha é aceita (antes esperava 2,5 s,
+                            // e o terminal já mostrava a próxima senha com o ambiente ainda aberto).
+                            for(var a = 0; a < 10; a++) {
+                                if(this.lightsOutState[a]) {
+                                    this.lightsOutState[a] = false;
+                                    this.aplicarEstadoVisual(a, false);
+                                }
+                            }
+                            this.atualizarPulsos();
+                        }
+                    } else {
+                        this.inputAtual = "";
+                        this.textoDisplay.setAttribute('troika-text', 'value: ERRO!; color: #ff2d55; align: center; fontSize: 0.06');
+                        this.textoDisplay.setAttribute('position', '0 0 0.01');
+                        var self = this;
+                        setTimeout(function(){ self.atualizarDisplay(); }, 1000);
+                        return;
+                    }
+                } else {
+                    if(this.inputAtual.length < 5) this.inputAtual += tecla;
+                }
+                this.atualizarDisplay();
+            },
+
+            ativarAcessoDireto: function() {
+                if (this.terminalStep >= 4) return;
+                this.terminalStep = 4;
+                this.inputAtual = "";
+                for (var r = 0; r < this.aneisCupula.length; r++) {
+                    this.aneisCupula[r].setAttribute('material', 'color', this.corCoroa);
+                }
+                this.textoDisplay.setAttribute('troika-text', 'value: ACESSO TOTAL!\nSISTEMA ONLINE\n[ C ] P/ REINICIAR; color: #39ff14; align: center; fontSize: 0.045');
+                this.textoDisplay.setAttribute('position', '0 0 0.01');
+                this.atualizarJumbotron();
+                for (var a = 0; a < 10; a++) {
+                    this.lightsOutState[a] = true;
+                    this.aplicarEstadoVisual(a, true);
+                }
+                this.atualizarPulsos();
+            },
+
+            ativarModoDev: function() {
+                var rig = document.querySelector('#rig');
+                if (rig && rig.components['vertical-movement']) {
+                    rig.components['vertical-movement'].active = true;
+                }
+                this.inputAtual = "";
+                this.textoDisplay.setAttribute('troika-text', 'value: DEV MODE:\nVOO ATIVADO; color: #d400ff; align: center; fontSize: 0.05');
+                this.textoDisplay.setAttribute('position', '0 0 0.01');
+                var self = this;
+                setTimeout(function(){ 
+                    if(self.terminalStep === 4) {
+                        self.textoDisplay.setAttribute('troika-text', 'value: ACESSO TOTAL!\nSISTEMA ONLINE\n[ C ] P/ REINICIAR; color: #39ff14; align: center; fontSize: 0.045');
+                    } else {
+                        self.atualizarDisplay(); 
+                    }
+                }, 2000);
+            },
+
+            // Jumbotron ligado às SENHAS (terminalStep): mostra a pergunta da etapa atual numa face
+            // (mapaEnigmas) e o conteúdo padrão nas demais; com acesso total, tudo volta ao padrão.
+            atualizarJumbotron: function() {
+                var self = this;
+                var acessoTotal = this.terminalStep >= 4;
+                var mapaEnigmas = [2, 1, 3, 0];
+                var faces = document.querySelectorAll('.jumbotron-face');
+                faces.forEach(function(faceEl, i) {
+                    var logo = faceEl.querySelector('.jumbotron-logo');
+                    var texto = faceEl.querySelector('.jumbotron-texto');
+                    var txtPadrao = faceEl.getAttribute('data-default');
+                    var linhas = faceEl.querySelectorAll('.jumbotron-linha');
+                    if (!logo || !texto) return;
+                    if (!acessoTotal && i === mapaEnigmas[self.terminalStep]) {
+                        logo.setAttribute('visible', 'false');
+                        texto.setAttribute('position', '0 0 0.02');
+                        texto.setAttribute('troika-text', 'value', self.enigmas[self.terminalStep]);
+                        texto.setAttribute('troika-text', 'color', '#000000');
+                        texto.setAttribute('troika-text', 'fontSize', '0.34');
+                        texto.setAttribute('troika-text', 'maxWidth', '5.4');
+                        texto.setAttribute('troika-text', 'lineHeight', '1.15');
+                        if (linhas) linhas.forEach(function(l) { l.setAttribute('color', '#ff2d55'); });
+                    } else {
+                        logo.setAttribute('visible', 'true');
+                        texto.setAttribute('position', '0 -1.4 0.02');
+                        texto.setAttribute('troika-text', 'value', txtPadrao);
+                        texto.setAttribute('troika-text', 'color', '#05010f');
+                        texto.setAttribute('troika-text', 'fontSize', '0.18');
+                        texto.setAttribute('troika-text', 'maxWidth', '5');
+                        texto.setAttribute('troika-text', 'lineHeight', '1.2');
+                        if (linhas) linhas.forEach(function(l) { l.setAttribute('color', '#ffee00'); });
+                    }
+                });
+            },
+
+            atualizarDisplay: function() {
+                if(this.terminalStep < 4) {
+                    var displayVis = this.inputAtual.length > 0 ? this.inputAtual : '_ _ _';
+                    this.textoDisplay.setAttribute('troika-text', 'value: SENHA ' + (this.terminalStep + 1) + ':\n' + displayVis + '; color: #00fff2; align: center; fontSize: 0.055');
+                    this.textoDisplay.setAttribute('position', '0 0 0.01');
+                }
+            },
+
+            resetJogo: function() {
+                this.terminalStep = 0;
+                this.inputAtual = "";
+                this.atualizarDisplay();
+                
+                for(var r = 0; r < 4; r++) {
+                    this.aneisCupula[r].setAttribute('material', 'color', this.corApagada);
+                }
+
+                for(var a = 0; a < 10; a++) {
+                    this.lightsOutState[a] = false;
+                    this.aplicarEstadoVisual(a, false);
+                }
+
+                this.atualizarJumbotron(); // volta à pergunta 1 (terminalStep = 0)
+
+                teleportarComBlink(0, 0, 8 * window.ESCALA_MUNDO, 0, function() {
+                    esconderSalas();
+                    abrirMenuInicial();
+                }, true); // true: volta olhando de frente para o menu (também no óculos)
+
+                this.atualizarPulsos();
+            }
+        });
+    </script>
+</head>
+<body>
+    <div id="coord-display" style="position:fixed; top:15px; left:15px; z-index:9999; background:rgba(0,0,0,0.8); color:#00fff2; padding:10px 15px; border:1px solid #00fff2; border-radius:6px; font-family:monospace; font-size:14px; pointer-events:none; text-shadow: 0 0 5px #00fff2;">
+        X: 0.000 | Y: 0.000 | Z: 0.000
+    </div>
+
+    <a-scene cursor="rayOrigin: mouse" raycaster="objects: .interactable" renderer="antialias: true; colorManagement: true" background="color: #05010f" webxr="referenceSpaceType: local-floor">
+
+        <a-assets>
+            <img id="logo-mgc" src="https://www.museugameciencia.com.br/assets/LogoMuseu-C0J6co-V.png" crossorigin="anonymous">
+        </a-assets>
+
+        <a-sky color="#000000"></a-sky>
+
+        <a-entity id="ambiente-museu" scale="0.5 0.5 0.5" visible="false">
+            <a-entity gerador-de-salas></a-entity>
+            <a-entity salas-geracao></a-entity>
+
+            <a-entity position="0 0 0">
+                <a-cylinder position="0 0.25 0" radius="3.2" height="0.5" color="#0c0c18"></a-cylinder>
+                <a-torus position="0 0.5 0" rotation="90 0 0" radius="3.2" radius-tubular="0.05" material="shader: flat; color: #00fff2"></a-torus>
+                <a-cylinder position="0 1.8 0" radius="0.35" height="2.6" color="#12121f"></a-cylinder>
+                <a-entity position="0 3.6 0" animation="property: rotation; to: 0 360 0; loop: true; dur: 14000; easing: linear">
+                    <a-box width="0.9" height="0.9" depth="0.9" material="shader: flat; color: #ff00a0"></a-box>
+                    <a-torus radius="1.1" radius-tubular="0.04" rotation="70 0 0" material="shader: flat; color: #00fff2"></a-torus>
+                </a-entity>
+            </a-entity>
+
+            <!-- altura do anel amarelo mais baixo da cúpula principal (alturaAro = 6 + 6,18 + 0,25 ≈ 12,43) -->
+            <a-entity position="0 12.43 0">
+                <a-box width="5.8" height="4.5" depth="5.8" color="#080810"></a-box>
+
+                <!-- Face 0 -->
+                <a-entity class="jumbotron-face" data-default="CONHECIMENTO, APRENDIZADO E DIVERSÃO" position="0 0 3.5" rotation="10 0 0">
+                    <a-plane width="6" height="4.5" material="shader: flat; color: #ffffff">
+                        <a-plane position="0 0 -0.01" width="6.2" height="4.7" material="shader: flat; color: #ffee00"></a-plane>
+                        <a-image class="jumbotron-logo" src="#logo-mgc" position="0 0.4 0.02" width="4.5" height="2.25" transparent="true"></a-image>
+                        <a-entity class="jumbotron-texto" troika-text="value: CONHECIMENTO, APRENDIZADO E DIVERSÃO; color: #05010f; align: center; fontSize: 0.18; maxWidth: 5" position="0 -1.4 0.02"></a-entity>
+                        <a-plane class="jumbotron-linha" position="0 1.8 0.02" width="5.4" height="0.08" color="#ffee00"></a-plane>
+                        <a-plane class="jumbotron-linha" position="0 -1.8 0.02" width="5.4" height="0.08" color="#ffee00"></a-plane>
+                    </a-plane>
+                </a-entity>
+
+                <!-- Face 1 -->
+                <a-entity class="jumbotron-face" data-default="CONHECIMENTO, APRENDIZADO E DIVERSÃO" position="0 0 -3.5" rotation="10 180 0">
+                    <a-plane width="6" height="4.5" material="shader: flat; color: #ffffff">
+                        <a-plane position="0 0 -0.01" width="6.2" height="4.7" material="shader: flat; color: #ffee00"></a-plane>
+                        <a-image class="jumbotron-logo" src="#logo-mgc" position="0 0.4 0.02" width="4.5" height="2.25" transparent="true"></a-image>
+                        <a-entity class="jumbotron-texto" troika-text="value: CONHECIMENTO, APRENDIZADO E DIVERSÃO; color: #05010f; align: center; fontSize: 0.18; maxWidth: 5" position="0 -1.4 0.02"></a-entity>
+                        <a-plane class="jumbotron-linha" position="0 1.8 0.02" width="5.4" height="0.08" color="#ffee00"></a-plane>
+                        <a-plane class="jumbotron-linha" position="0 -1.8 0.02" width="5.4" height="0.08" color="#ffee00"></a-plane>
+                    </a-plane>
+                </a-entity>
+
+                <!-- Face 2 -->
+                <a-entity class="jumbotron-face" data-default="DIVULGANDO A CIÊNCIA POR MEIO DOS JOGOS" position="3.5 0 0" rotation="10 90 0">
+                    <a-plane width="6" height="4.5" material="shader: flat; color: #ffffff">
+                        <a-plane position="0 0 -0.01" width="6.2" height="4.7" material="shader: flat; color: #ffee00"></a-plane>
+                        <a-image class="jumbotron-logo" src="#logo-mgc" position="0 0.4 0.02" width="4.5" height="2.25" transparent="true"></a-image>
+                        <a-entity class="jumbotron-texto" troika-text="value: DIVULGANDO A CIÊNCIA POR MEIO DOS JOGOS; color: #05010f; align: center; fontSize: 0.18; maxWidth: 5" position="0 -1.4 0.02"></a-entity>
+                        <a-plane class="jumbotron-linha" position="0 1.8 0.02" width="5.4" height="0.08" color="#ffee00"></a-plane>
+                        <a-plane class="jumbotron-linha" position="0 -1.8 0.02" width="5.4" height="0.08" color="#ffee00"></a-plane>
+                    </a-plane>
+                </a-entity>
+
+                <!-- Face 3 -->
+                <a-entity class="jumbotron-face" data-default="DIVULGANDO A CIÊNCIA POR MEIO DOS JOGOS" position="-3.5 0 0" rotation="10 -90 0">
+                    <a-plane width="6" height="4.5" material="shader: flat; color: #ffffff">
+                        <a-plane position="0 0 -0.01" width="6.2" height="4.7" material="shader: flat; color: #ffee00"></a-plane>
+                        <a-image class="jumbotron-logo" src="#logo-mgc" position="0 0.4 0.02" width="4.5" height="2.25" transparent="true"></a-image>
+                        <a-entity class="jumbotron-texto" troika-text="value: DIVULGANDO A CIÊNCIA POR MEIO DOS JOGOS; color: #05010f; align: center; fontSize: 0.18; maxWidth: 5" position="0 -1.4 0.02"></a-entity>
+                        <a-plane class="jumbotron-linha" position="0 1.8 0.02" width="5.4" height="0.08" color="#ffee00"></a-plane>
+                        <a-plane class="jumbotron-linha" position="0 -1.8 0.02" width="5.4" height="0.08" color="#ffee00"></a-plane>
+                    </a-plane>
+                </a-entity>
+            </a-entity>
+        </a-entity>
+
+        <a-light type="ambient" color="#3a3550" intensity="0.7"></a-light>
+        <a-light type="point" intensity="0.9" position="0 8 0" color="#ffffff" distance="60"></a-light>
+
+        <!-- ==========================================
+             MENU INICIAL EM VR (mouse no desktop, laser no óculos)
+             Fica no espaço do mundo (fora de #ambiente-museu, que tem escala 0.5),
+             diante do ponto de partida do jogador (rig em 0 0 4, olhando para -z).
+             ========================================== -->
+        <a-entity id="menu-inicial-vr">
+            <a-circle radius="2.4" rotation="-90 0 0" position="0 0.01 3.2" material="shader: flat; color: #0a0a14"></a-circle>
+            <a-torus radius="2.4" radius-tubular="0.012" rotation="90 0 0" position="0 0.02 3.2" segments-tubular="48" material="shader: flat; color: #00fff2"></a-torus>
+
+            <a-entity position="0 1.7 1.6">
+                <a-plane width="3.06" height="2.16" position="0 0 -0.01" material="shader: flat; color: #00fff2"></a-plane>
+                <a-plane width="3.0" height="2.1" material="shader: flat; color: #06060f"></a-plane>
+
+                <a-entity logo-proporcional position="0 0.45 0.01">
+                    <a-plane class="logo-fundo" width="1.76" height="0.96" position="0 0 0" material="shader: flat; color: #ffffff"></a-plane>
+                    <a-image class="logo-imagem" src="#logo-mgc" width="1.6" height="0.8" position="0 0 0.01" transparent="true"></a-image>
+                </a-entity>
+
+                <a-entity position="-0.72 -0.42 0.02">
+                    <a-plane width="1.36" height="0.42" position="0 0 -0.006" material="shader: flat; color: #00fff2"></a-plane>
+                    <a-plane class="interactable" botao-modo="modo: visitar; cor: #00fff2" width="1.3" height="0.36" material="shader: flat; color: #0c0c18">
+                        <a-entity troika-text="value: VISITAR EXPOSIÇÃO; color: #00fff2; align: center; fontSize: 0.085; letterSpacing: 0.05; maxWidth: 1.25" position="0 0 0.01"></a-entity>
+                    </a-plane>
+                </a-entity>
+                <a-entity position="0.72 -0.42 0.02">
+                    <a-plane width="1.36" height="0.42" position="0 0 -0.006" material="shader: flat; color: #ff2d55"></a-plane>
+                    <a-plane class="interactable" botao-modo="modo: escape; cor: #ff2d55" width="1.3" height="0.36" material="shader: flat; color: #0c0c18">
+                        <a-entity troika-text="value: INICIAR ESCAPE ROOM; color: #ff2d55; align: center; fontSize: 0.085; letterSpacing: 0.05; maxWidth: 1.25" position="0 0 0.01"></a-entity>
+                    </a-plane>
+                </a-entity>
+
+                <!-- Espaço reservado para os agradecimentos (a definir): adicione aqui um
+                     <a-entity troika-text="value: ...; fontSize: 0.07; align: center; maxWidth: 2.7" position="0 -0.82 0.02"> -->
+                <a-entity id="menu-rodape" position="0 -0.82 0.02"></a-entity>
+            </a-entity>
+        </a-entity>
+
+        <a-entity id="rig" position="0 0 4" movement-controls="speed: 0.2; enabled: false" vertical-movement rastreador-coords>
+            <a-camera id="camera-jogador" position="0 1.6 0" look-controls="enabled: false" wasd-controls="enabled: false">
+                <a-sphere id="blink" blink-fade radius="0.4" segments-width="12" segments-height="8" material="shader: flat; color: #000000; side: back; transparent: true; opacity: 0; depthTest: false; depthWrite: false"></a-sphere>
+                <a-ring id="mouse-cursor" mouse-cursor-tracker radius-inner="0.015" radius-outer="0.025" color="#00fff2" material="shader: flat; opacity: 0.8"></a-ring>
+            </a-camera>
+            <a-entity laser-controls="hand: left" raycaster="far: 10; objects: .interactable" line="color: #00fff2; opacity: 0.6"></a-entity>
+            <a-entity laser-controls="hand: right" raycaster="far: 10; objects: .interactable" line="color: #ff00a0; opacity: 0.6"></a-entity>
+        </a-entity>
+
+    </a-scene>
+</body>
+</html>
